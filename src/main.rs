@@ -5,6 +5,9 @@ use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 mod discovery;
+mod identity;
+
+use identity::device::Device;
 
 #[derive(Parser)]
 #[command(name = "gannet")]
@@ -19,6 +22,8 @@ enum Commands {
     Scan {
         #[arg(short, long)]
         subnet: Option<String>,
+        #[arg(short, long, default_value = "443")]
+        port: u16,
     },
 }
 
@@ -27,7 +32,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { subnet } => {
+        Commands::Scan { subnet, port } => {
             let (base, prefix) = match subnet {
                 Some(ref input) => parse_subnet(input),
                 None => auto_subnet(),
@@ -37,14 +42,52 @@ async fn main() {
 
             if entries.is_empty() {
                 println!("No devices found.");
-            } else {
-                println!("{:<16} {:<18}", "IP", "MAC");
-                println!("{}", "-".repeat(35));
-                for entry in &entries {
-                    println!("{:<16} {:<18}", entry.ip, entry.mac);
-                }
-                println!("\nFound {} device(s).", entries.len());
+                return;
             }
+
+            let ips: Vec<Ipv4Addr> = entries.iter().map(|e| e.ip).collect();
+            println!("Resolving mDNS hostnames...");
+            let mdns_results = discovery::mdns::resolve_bulk(&ips).await;
+
+            let mut devices: Vec<Device> = entries
+                .iter()
+                .map(|e| {
+                    let mut device = Device::from(e);
+                    if let Some(mdns) = mdns_results.get(&e.ip) {
+                        device.hostname = Some(mdns.hostname.clone());
+                    }
+                    device
+                })
+                .collect();
+
+            println!("Fingerprinting TCP stacks (port {})...", port);
+            let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, port)).collect();
+            let fingerprints = discovery::fingerprint::probe_bulk(&targets).await;
+
+            for (ip, fp_result) in &fingerprints {
+                if let Some(ref fp) = fp_result {
+                    if let Some(device) = devices.iter_mut().find(|d| d.ip == *ip) {
+                        device.apply_fingerprint(fp);
+                    }
+                }
+            }
+
+            devices.sort_by_key(|d| u32::from(d.ip));
+
+            println!(
+                "\n{:<16} {:<18} {:<30} {:<24}",
+                "IP", "MAC", "Hostname", "OS Hint"
+            );
+            println!("{}", "-".repeat(88));
+            for device in &devices {
+                let hostname = device.hostname.as_deref().unwrap_or("-");
+                let os_hint = device.os_hint.as_deref().unwrap_or("-");
+                println!(
+                    "{:<16} {:<18} {:<30} {:<24}",
+                    device.ip, device.mac, hostname, os_hint
+                );
+            }
+            println!("\nFound {} device(s).", devices.len());
         }
     }
 }
