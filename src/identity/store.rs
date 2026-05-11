@@ -44,7 +44,7 @@ fn ip_key(ip: Ipv4Addr) -> String {
     ip.to_string()
 }
 
-fn insert_record(records: &mut HashMap<String, Record>, mut record: Record) -> &Record {
+fn insert_record(records: &mut HashMap<String, Record>, record: Record) -> &Record {
     let key = record.key.clone();
     records.insert(key.clone(), record);
     &records[&key]
@@ -102,7 +102,7 @@ impl Store {
                 }
 
                 let record = self.records.entry(mkey.clone()).or_insert_with(|| {
-                    let mut ips = vec![ip_str.clone()];
+                    let ips = vec![ip_str.clone()];
                     Record {
                         key: mkey.clone(),
                         mac: Some(mac.to_string()),

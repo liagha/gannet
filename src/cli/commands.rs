@@ -1,5 +1,5 @@
 // FILE: src/cli/commands.rs
-// PURPOSE: Subcommand handlers for scan, tag, list
+// PURPOSE: Subcommand handlers for scan, tag, list, listen
 use crate::identity::device::{Device, Via};
 use crate::identity::store::Store;
 use std::collections::HashSet;
@@ -135,6 +135,11 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
     }
 
     println!("\nFound {} device(s).", devices.len());
+}
+
+pub async fn listen(interface: Option<String>, verbose: bool, store_path: PathBuf) {
+    println!("{}", BANNER);
+    crate::discovery::passive::listen(interface, verbose, store_path).await;
 }
 
 pub fn tag(ip: String, tag: String, store_path: PathBuf) {

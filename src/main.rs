@@ -29,6 +29,14 @@ enum Commands {
         #[arg(long, default_value = ".gannet/devices.json")]
         store: PathBuf,
     },
+    Listen {
+        #[arg(short, long)]
+        interface: Option<String>,
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long, default_value = ".gannet/devices.json")]
+        store: PathBuf,
+    },
     Tag {
         ip: String,
         tag: String,
@@ -48,6 +56,9 @@ async fn main() {
     match cli.command {
         Commands::Scan { subnet, interface, verbose, store } => {
             cli::commands::scan(subnet, interface, verbose, store).await;
+        }
+        Commands::Listen { interface, verbose, store } => {
+            cli::commands::listen(interface, verbose, store).await;
         }
         Commands::Tag { ip, tag, store } => {
             cli::commands::tag(ip, tag, store);
