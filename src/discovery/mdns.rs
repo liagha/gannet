@@ -1,15 +1,18 @@
 // FILE: src/discovery/mdns.rs
-// PURPOSE: Hostname resolution via mDNS and unicast DNS fallback
+// PURPOSE: Hostname resolution via mDNS, unicast DNS, and NetBIOS in parallel
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone)]
 pub struct MdnsResult {
     pub hostname: String,
 }
 
-const MULTICAST: &str = "224.0.0.251:5353";
+const MULTICAST_ADDR: &str = "224.0.0.251";
+const MULTICAST_PORT: u16 = 5353;
+const NBNS_PORT: u16 = 137;
 
 fn build_reverse_query(ip: Ipv4Addr, transaction_id: u16) -> Vec<u8> {
     let octets = ip.octets();
@@ -28,104 +31,108 @@ fn build_query(name: &str, qtype: u16, transaction_id: u16) -> Vec<u8> {
     packet.extend_from_slice(&[0x00, 0x00]);
     packet.extend_from_slice(&[0x00, 0x00]);
     packet.extend_from_slice(&[0x00, 0x00]);
-
     for label in name.split('.') {
         packet.push(label.len() as u8);
         packet.extend_from_slice(label.as_bytes());
     }
     packet.push(0x00);
-
     packet.extend_from_slice(&qtype.to_be_bytes());
     packet.extend_from_slice(&[0x00, 0x01]);
-
     packet
 }
 
-fn hexdump(data: &[u8]) -> String {
-    data.iter()
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join(" ")
+fn build_nbns_query(transaction_id: u16) -> Vec<u8> {
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&transaction_id.to_be_bytes());
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x01]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    packet.extend_from_slice(&[0x00, 0x00]);
+    let encoded = b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00";
+    packet.extend_from_slice(encoded);
+    packet.extend_from_slice(&[0x00, 0x21]);
+    packet.extend_from_slice(&[0x00, 0x01]);
+    packet
 }
 
-fn parse_hostname(data: &[u8]) -> Option<String> {
+fn parse_hostname(data: &[u8], verbose: bool) -> Option<String> {
     if data.len() < 12 {
-        eprintln!("    [parse] data too short: {} bytes", data.len());
+        if verbose {
+            eprintln!("    [parse] data too short: {} bytes", data.len());
+        }
         return None;
     }
 
     let questions = u16::from_be_bytes([data[4], data[5]]) as usize;
     let answers = u16::from_be_bytes([data[6], data[7]]) as usize;
-    let flags = u16::from_be_bytes([data[2], data[3]]);
-    eprintln!(
-        "    [parse] flags=0x{:04x} questions={} answers={}",
-        flags, questions, answers
-    );
 
     if answers == 0 {
-        let rcode = flags & 0x000F;
-        eprintln!("    [parse] no answers, rcode={}", rcode);
         return None;
     }
 
     let mut pos = 12usize;
 
-    for i in 0..questions {
-        let start = pos;
+    for _ in 0..questions {
         pos = skip_label(data, pos)?;
-        let qtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
-        let qclass = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
-        eprintln!(
-            "    [parse] question[{}] @{}..{} qtype={} qclass={}",
-            i,
-            start,
-            pos + 4,
-            qtype,
-            qclass
-        );
         pos += 4;
     }
 
     for i in 0..answers {
-        let name_start = pos;
         pos = skip_label(data, pos)?;
         if pos + 10 > data.len() {
-            eprintln!("    [parse] answer[{}] truncated at pos {}", i, pos);
             return None;
         }
-
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
-        let rclass = u16::from_be_bytes([data[pos + 2], data[pos + 3]]);
-        let ttl = u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
         let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
-        let rdata_start = pos + 10;
-        eprintln!(
-            "    [parse] answer[{}] name@{} type={} class={} ttl={} rdlen={} rdata@{}",
-            i, name_start, rtype, rclass, ttl, rdlen, rdata_start
-        );
-        eprintln!(
-            "    [parse] answer[{}] rdata hex: {}",
-            i,
-            hexdump(&data[rdata_start..rdata_start + rdlen.min(64)])
-        );
         pos += 10;
 
         if rtype == 0x000C {
             if let Some(name) = decode_label(data, pos) {
                 let trimmed = name.trim_end_matches('.').to_string();
-                eprintln!("    [parse] answer[{}] decoded name: '{}'", i, trimmed);
+                if verbose {
+                    eprintln!("    [parse] answer[{}] decoded name: '{}'", i, trimmed);
+                }
                 if !trimmed.is_empty() && trimmed != "in-addr.arpa" {
                     return Some(trimmed);
                 }
-            } else {
-                eprintln!("    [parse] answer[{}] decode_label failed at pos {}", i, pos);
             }
         }
 
         pos += rdlen;
     }
 
-    eprintln!("    [parse] no PTR hostname found");
+    None
+}
+
+fn parse_nbns_response(data: &[u8]) -> Option<String> {
+    if data.len() < 57 {
+        return None;
+    }
+    let answers = u16::from_be_bytes([data[6], data[7]]);
+    if answers == 0 {
+        return None;
+    }
+    let name_raw = &data[56..];
+    let num_names = *name_raw.first()? as usize;
+    let mut pos = 1usize;
+    for _ in 0..num_names {
+        if pos + 18 > name_raw.len() {
+            break;
+        }
+        let name_bytes = &name_raw[pos..pos + 15];
+        let flags = u16::from_be_bytes([name_raw[pos + 16], name_raw[pos + 17]]);
+        let is_group = flags & 0x8000 != 0;
+        if !is_group {
+            let name = String::from_utf8_lossy(name_bytes)
+                .trim_end()
+                .to_lowercase();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+        pos += 18;
+    }
     None
 }
 
@@ -176,106 +183,114 @@ fn decode_label(data: &[u8], mut pos: usize) -> Option<String> {
     Some(parts.join("."))
 }
 
-fn mdns_reverse(ip: Ipv4Addr) -> Option<String> {
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("  [mDNS] {} bind failed: {}", ip, e);
-            return None;
-        }
-    };
-
-    if socket.set_read_timeout(Some(Duration::from_millis(400))).is_err() {
-        eprintln!("  [mDNS] {} set_read_timeout failed", ip);
-        return None;
-    }
+fn mdns_reverse(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    let _ = socket.join_multicast_v4(
+        &MULTICAST_ADDR.parse().unwrap(),
+        &"0.0.0.0".parse().unwrap(),
+    );
+    socket.set_read_timeout(Some(Duration::from_millis(400))).ok()?;
 
     let query = build_reverse_query(ip, 1);
-    let octets = ip.octets();
-    let reverse_name = format!(
-        "{}.{}.{}.{}.in-addr.arpa",
-        octets[3], octets[2], octets[1], octets[0]
-    );
+    let target = SocketAddrV4::new(MULTICAST_ADDR.parse().unwrap(), MULTICAST_PORT);
+    socket.send_to(&query, target).ok()?;
 
-    if socket.send_to(&query, MULTICAST).is_err() {
-        eprintln!("  [mDNS] {} send to multicast failed", ip);
-        return None;
+    if verbose {
+        let o = ip.octets();
+        eprintln!("  [mDNS] {} -> multicast query for {}.{}.{}.{}.in-addr.arpa", ip, o[3], o[2], o[1], o[0]);
     }
-
-    eprintln!("  [mDNS] {} -> multicast query for {}", ip, reverse_name);
 
     let mut buf = [0u8; 1500];
     match socket.recv_from(&mut buf) {
         Ok((len, src)) => {
-            eprintln!("  [mDNS] {} <- {} bytes from {}", ip, len, src);
-            eprintln!("  [mDNS] {} response hex: {}", ip, hexdump(&buf[..len.min(128)]));
-            let result = parse_hostname(&buf[..len]);
-            eprintln!("  [mDNS] {} parse result: {:?}", ip, result);
-            result
+            if verbose {
+                eprintln!("  [mDNS] {} <- {} bytes from {}", ip, len, src);
+            }
+            parse_hostname(&buf[..len], verbose)
         }
-        Err(e) => {
-            eprintln!("  [mDNS] {} recv timeout/error: {:?}", ip, e.kind());
-            None
-        }
+        Err(_) => None,
     }
 }
 
-fn unicast_reverse(ip: Ipv4Addr) -> Option<String> {
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("  [DNS] {} bind failed: {}", ip, e);
-            return None;
-        }
-    };
-
-    if socket.set_read_timeout(Some(Duration::from_millis(300))).is_err() {
-        eprintln!("  [DNS] {} set_read_timeout failed", ip);
-        return None;
-    }
+fn unicast_reverse(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.set_read_timeout(Some(Duration::from_millis(300))).ok()?;
 
     let query = build_reverse_query(ip, 2);
     let target = format!("{}:53", ip);
+    socket.send_to(&query, &target).ok()?;
 
-    if socket.send_to(&query, &target).is_err() {
-        eprintln!("  [DNS] {} send to {} failed", ip, target);
-        return None;
+    if verbose {
+        eprintln!("  [DNS] {} -> unicast query to {}", ip, target);
     }
-
-    eprintln!("  [DNS] {} -> unicast query to {}", ip, target);
 
     let mut buf = [0u8; 1500];
     match socket.recv_from(&mut buf) {
         Ok((len, src)) => {
-            eprintln!("  [DNS] {} <- {} bytes from {}", ip, len, src);
-            eprintln!("  [DNS] {} response hex: {}", ip, hexdump(&buf[..len.min(128)]));
-            let result = parse_hostname(&buf[..len]);
-            eprintln!("  [DNS] {} parse result: {:?}", ip, result);
-            result
+            if verbose {
+                eprintln!("  [DNS] {} <- {} bytes from {}", ip, len, src);
+            }
+            parse_hostname(&buf[..len], verbose)
         }
-        Err(e) => {
-            eprintln!("  [DNS] {} recv timeout/error: {:?}", ip, e.kind());
-            None
-        }
+        Err(_) => None,
     }
 }
 
-pub fn query_reverse(ip: Ipv4Addr) -> Option<MdnsResult> {
-    if let Some(hostname) = mdns_reverse(ip) {
-        return Some(MdnsResult { hostname });
+fn nbns_query(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.set_read_timeout(Some(Duration::from_millis(400))).ok()?;
+
+    let query = build_nbns_query(3);
+    let target = SocketAddrV4::new(ip, NBNS_PORT);
+    socket.send_to(&query, target).ok()?;
+
+    if verbose {
+        eprintln!("  [NBNS] {} -> NetBIOS name query", ip);
     }
 
-    if let Some(hostname) = unicast_reverse(ip) {
-        return Some(MdnsResult { hostname });
+    let mut buf = [0u8; 1500];
+    match socket.recv_from(&mut buf) {
+        Ok((len, src)) => {
+            if verbose {
+                eprintln!("  [NBNS] {} <- {} bytes from {}", ip, len, src);
+            }
+            parse_nbns_response(&buf[..len])
+        }
+        Err(_) => None,
     }
-
-    None
 }
 
-pub async fn resolve_bulk(ips: &[Ipv4Addr]) -> HashMap<Ipv4Addr, MdnsResult> {
-    let mut results = HashMap::new();
+fn query_reverse(ip: Ipv4Addr, verbose: bool) -> Option<MdnsResult> {
+    let mdns = std::thread::spawn(move || mdns_reverse(ip, verbose));
+    let unicast = std::thread::spawn(move || unicast_reverse(ip, verbose));
+    let nbns = std::thread::spawn(move || nbns_query(ip, verbose));
+
+    let mdns_result = mdns.join().ok().flatten();
+    let unicast_result = unicast.join().ok().flatten();
+    let nbns_result = nbns.join().ok().flatten();
+
+    mdns_result
+        .or(unicast_result)
+        .or(nbns_result)
+        .map(|hostname| MdnsResult { hostname })
+}
+
+pub async fn resolve_bulk(ips: &[Ipv4Addr], verbose: bool) -> HashMap<Ipv4Addr, MdnsResult> {
+    let mut set = JoinSet::new();
+
     for &ip in ips {
-        if let Some(result) = query_reverse(ip) {
+        set.spawn(async move {
+            let result = tokio::task::spawn_blocking(move || query_reverse(ip, verbose))
+                .await
+                .ok()
+                .flatten();
+            (ip, result)
+        });
+    }
+
+    let mut results = HashMap::new();
+    while let Some(Ok((ip, maybe))) = set.join_next().await {
+        if let Some(result) = maybe {
             results.insert(ip, result);
         }
     }

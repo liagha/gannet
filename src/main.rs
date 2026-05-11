@@ -22,8 +22,8 @@ enum Commands {
     Scan {
         #[arg(short, long)]
         subnet: Option<String>,
-        #[arg(short, long, default_value = "443")]
-        port: u16,
+        #[arg(short, long)]
+        verbose: bool,
     },
 }
 
@@ -32,7 +32,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { subnet, port } => {
+        Commands::Scan { subnet, verbose } => {
             let (base, prefix) = match subnet {
                 Some(ref input) => parse_subnet(input),
                 None => auto_subnet(),
@@ -46,8 +46,11 @@ async fn main() {
             }
 
             let ips: Vec<Ipv4Addr> = entries.iter().map(|e| e.ip).collect();
-            println!("Resolving mDNS hostnames...");
-            let mdns_results = discovery::mdns::resolve_bulk(&ips).await;
+
+            if verbose {
+                eprintln!("Resolving hostnames (mDNS / DNS / NetBIOS)...");
+            }
+            let mdns_results = discovery::mdns::resolve_bulk(&ips, verbose).await;
 
             let mut devices: Vec<Device> = entries
                 .iter()
@@ -60,9 +63,11 @@ async fn main() {
                 })
                 .collect();
 
-            println!("Fingerprinting TCP stacks (port {})...", port);
-            let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, port)).collect();
-            let fingerprints = discovery::fingerprint::probe_bulk(&targets).await;
+            if verbose {
+                eprintln!("Fingerprinting TCP stacks (ports 443/80/22)...");
+            }
+            let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, 0)).collect();
+            let fingerprints = discovery::fingerprint::probe_bulk(&targets, verbose).await;
 
             for (ip, fp_result) in &fingerprints {
                 if let Some(ref fp) = fp_result {

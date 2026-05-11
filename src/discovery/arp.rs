@@ -49,14 +49,12 @@ fn send_arp_request(
 
     let mut ethernet_buffer = [0u8; 42];
     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer)?;
-
     ethernet_packet.set_destination(MacAddr::broadcast());
     ethernet_packet.set_source(source_mac);
     ethernet_packet.set_ethertype(EtherTypes::Arp);
 
     let mut arp_buffer = [0u8; 28];
     let mut arp_packet = MutableArpPacket::new(&mut arp_buffer)?;
-
     arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
     arp_packet.set_protocol_type(EtherTypes::Ipv4);
     arp_packet.set_hw_addr_len(6);
@@ -82,29 +80,29 @@ fn macaddr_to_macaddr6(mac: MacAddr) -> MacAddr6 {
 
 async fn receive_arp_responses(
     interface: NetworkInterface,
-    duration_secs: u64,
+    hard_cap: Duration,
+    quiet_window: Duration,
 ) -> HashSet<ArpEntry> {
     let (tx, mut rx) = mpsc::unbounded_channel();
 
     std::thread::spawn(move || {
-        let mut rx = match datalink::channel(&interface, Default::default()) {
+        let mut channel = match datalink::channel(&interface, Default::default()) {
             Ok(Channel::Ethernet(_, rx)) => rx,
             _ => return,
         };
 
-        let deadline = std::time::Instant::now() + Duration::from_secs(duration_secs);
+        let deadline = std::time::Instant::now() + hard_cap;
 
         while std::time::Instant::now() < deadline {
-            match rx.next() {
+            match channel.next() {
                 Ok(packet) => {
                     if let Some(ethernet) = pnet::packet::ethernet::EthernetPacket::new(packet) {
                         if ethernet.get_ethertype() == EtherTypes::Arp {
                             if let Some(arp) = ArpPacket::new(ethernet.payload()) {
                                 if arp.get_operation() == ArpOperations::Reply {
-                                    let sender_ip = Ipv4Addr::from(arp.get_sender_proto_addr());
-                                    let sender_mac = arp.get_sender_hw_addr();
-                                    let mac = macaddr_to_macaddr6(sender_mac);
-                                    let _ = tx.send(ArpEntry { ip: sender_ip, mac });
+                                    let ip = Ipv4Addr::from(arp.get_sender_proto_addr());
+                                    let mac = macaddr_to_macaddr6(arp.get_sender_hw_addr());
+                                    let _ = tx.send(ArpEntry { ip, mac });
                                 }
                             }
                         }
@@ -116,15 +114,22 @@ async fn receive_arp_responses(
     });
 
     let mut entries = HashSet::new();
-    let end = tokio::time::sleep(Duration::from_secs(duration_secs));
-    tokio::pin!(end);
+    let hard_end = tokio::time::sleep(hard_cap);
+    tokio::pin!(hard_end);
 
     loop {
+        let quiet = tokio::time::sleep(quiet_window);
         tokio::select! {
             Some(entry) = rx.recv() => {
                 entries.insert(entry);
             }
-            _ = &mut end => {
+            _ = quiet, if !entries.is_empty() => {
+                break;
+            }
+            _ = &mut hard_end => {
+                while let Ok(entry) = rx.try_recv() {
+                    entries.insert(entry);
+                }
                 break;
             }
         }
@@ -141,7 +146,7 @@ pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
 
     let source_ip = match interface.ips.iter().find(|ip| ip.is_ipv4()) {
         Some(ip) => match ip.ip() {
-            IpAddr::V4(ipv4) => ipv4,
+            IpAddr::V4(v4) => v4,
             _ => return Vec::new(),
         },
         None => return Vec::new(),
@@ -153,20 +158,25 @@ pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
     };
 
     let targets = subnet_iter(subnet, prefix);
-
     let recv_interface = interface.clone();
+
     let recv_handle = tokio::spawn(async move {
-        receive_arp_responses(recv_interface, 8).await
+        receive_arp_responses(
+            recv_interface,
+            Duration::from_secs(5),
+            Duration::from_millis(1500),
+        )
+            .await
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     for target_ip in &targets {
         send_arp_request(&interface, source_ip, source_mac, *target_ip);
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
-    let entries = match timeout(Duration::from_secs(10), recv_handle).await {
+    let entries = match timeout(Duration::from_secs(6), recv_handle).await {
         Ok(Ok(set)) => set,
         _ => HashSet::new(),
     };
