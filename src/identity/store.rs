@@ -18,6 +18,7 @@ pub struct Record {
     pub vendor: Option<String>,
     pub hostname: Option<String>,
     pub os_hint: Option<String>,
+    pub services: Vec<String>,
     pub first_seen: u64,
     pub last_seen: u64,
     pub seen_count: u32,
@@ -48,6 +49,15 @@ fn insert_record(records: &mut HashMap<String, Record>, record: Record) -> &Reco
     let key = record.key.clone();
     records.insert(key.clone(), record);
     &records[&key]
+}
+
+fn merge_string_vec(mut existing: Vec<String>, incoming: Vec<String>) -> Vec<String> {
+    for item in incoming {
+        if !existing.contains(&item) {
+            existing.push(item);
+        }
+    }
+    existing
 }
 
 impl Store {
@@ -97,6 +107,7 @@ impl Store {
                         if device.vendor.is_some() { old.vendor = device.vendor.clone(); }
                         if device.hostname.is_some() { old.hostname = device.hostname.clone(); }
                         if device.os_hint.is_some() { old.os_hint = device.os_hint.clone(); }
+                        old.services = merge_string_vec(old.services, device.services.clone());
                         return insert_record(&mut self.records, old);
                     }
                 }
@@ -112,6 +123,7 @@ impl Store {
                         vendor: device.vendor.clone(),
                         hostname: device.hostname.clone(),
                         os_hint: device.os_hint.clone(),
+                        services: device.services.clone(),
                         first_seen: now,
                         last_seen: now,
                         seen_count: 0,
@@ -127,6 +139,7 @@ impl Store {
                 if device.vendor.is_some() { record.vendor = device.vendor.clone(); }
                 if device.hostname.is_some() { record.hostname = device.hostname.clone(); }
                 if device.os_hint.is_some() { record.os_hint = device.os_hint.clone(); }
+                record.services = merge_string_vec(std::mem::take(&mut record.services), device.services.clone());
 
                 &self.records[&mkey]
             }
@@ -142,6 +155,7 @@ impl Store {
                     vendor: device.vendor.clone(),
                     hostname: device.hostname.clone(),
                     os_hint: device.os_hint.clone(),
+                    services: device.services.clone(),
                     first_seen: now,
                     last_seen: now,
                     seen_count: 0,
@@ -156,6 +170,7 @@ impl Store {
                 if device.vendor.is_some() { record.vendor = device.vendor.clone(); }
                 if device.hostname.is_some() { record.hostname = device.hostname.clone(); }
                 if device.os_hint.is_some() { record.os_hint = device.os_hint.clone(); }
+                record.services = merge_string_vec(std::mem::take(&mut record.services), device.services.clone());
 
                 &self.records[&ikey]
             }

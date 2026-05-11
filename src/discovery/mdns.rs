@@ -8,6 +8,7 @@ use tokio::task::JoinSet;
 #[derive(Debug, Clone)]
 pub struct MdnsResult {
     pub hostname: String,
+    pub services: Vec<String>,
 }
 
 const MULTICAST_ADDR: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
@@ -111,8 +112,31 @@ fn best_hostname(names: Vec<String>) -> Option<String> {
     scored.into_iter().max_by_key(|(_, s)| *s).map(|(n, _)| n)
 }
 
-fn parse_mdns_records(data: &[u8]) -> Vec<String> {
-    if data.len() < 12 { return Vec::new(); }
+fn extract_service_type(name: &str) -> Option<String> {
+    if !name.starts_with('_') {
+        return None;
+    }
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() >= 2 {
+        let service = parts[0];
+        let proto = parts.get(1).copied().unwrap_or("");
+        if (proto == "_tcp" || proto == "_udp") && service.len() > 1 {
+            let clean = service.trim_start_matches('_').to_string();
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+struct ParseResult {
+    names: Vec<String>,
+    services: Vec<String>,
+}
+
+fn parse_mdns_records(data: &[u8]) -> ParseResult {
+    if data.len() < 12 { return ParseResult { names: Vec::new(), services: Vec::new() }; }
 
     let questions = u16::from_be_bytes([data[4], data[5]]) as usize;
     let answer_rrs = u16::from_be_bytes([data[6], data[7]]) as usize;
@@ -120,13 +144,17 @@ fn parse_mdns_records(data: &[u8]) -> Vec<String> {
     let additional_rrs = u16::from_be_bytes([data[10], data[11]]) as usize;
     let total_rrs = answer_rrs + authority_rrs + additional_rrs;
 
-    if total_rrs == 0 { return Vec::new(); }
+    if total_rrs == 0 { return ParseResult { names: Vec::new(), services: Vec::new() }; }
 
     let mut pos = 12usize;
     let mut names = Vec::new();
+    let mut services = Vec::new();
 
     for _ in 0..questions {
-        if let Some((_, next)) = decode_label(data, pos) {
+        if let Some((name, next)) = decode_label(data, pos) {
+            if let Some(svc) = extract_service_type(&name) {
+                services.push(svc);
+            }
             pos = next + 4;
         } else {
             break;
@@ -143,12 +171,30 @@ fn parse_mdns_records(data: &[u8]) -> Vec<String> {
         };
         pos = next;
 
+        if let Some(svc) = extract_service_type(&name) {
+            services.push(svc);
+        }
+
         if pos + 10 > data.len() { break; }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
         pos += 10;
 
         match rtype {
+            0x000C => {
+                if let Some((rdata, _)) = decode_label(data, pos) {
+                    if let Some(svc) = extract_service_type(&rdata) {
+                        services.push(svc);
+                    }
+                    let parts: Vec<&str> = rdata.split('.').collect();
+                    if let Some(instance) = parts.first() {
+                        let s = instance.trim_start_matches('_').to_string();
+                        if !s.is_empty() && !is_service_label(&s) {
+                            names.push(s);
+                        }
+                    }
+                }
+            }
             0x0021 => {
                 if pos + 6 <= data.len() {
                     if let Some((host, _)) = decode_label(data, pos + 6) {
@@ -169,17 +215,6 @@ fn parse_mdns_records(data: &[u8]) -> Vec<String> {
                     .to_string();
                 if !clean.is_empty() && !is_service_label(&clean) {
                     names.push(clean);
-                }
-            }
-            0x000C => {
-                if let Some((rdata, _)) = decode_label(data, pos) {
-                    let parts: Vec<&str> = rdata.split('.').collect();
-                    if let Some(instance) = parts.first() {
-                        let s = instance.trim_start_matches('_').to_string();
-                        if !s.is_empty() && !is_service_label(&s) {
-                            names.push(s);
-                        }
-                    }
                 }
             }
             0x0010 => {
@@ -203,10 +238,13 @@ fn parse_mdns_records(data: &[u8]) -> Vec<String> {
         pos += rdlen;
     }
 
-    names
+    let mut seen = std::collections::HashSet::new();
+    services.retain(|s| seen.insert(s.clone()));
+
+    ParseResult { names, services }
 }
 
-fn unicast_mdns(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+fn unicast_mdns(ip: Ipv4Addr, verbose: bool) -> Option<MdnsResult> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.set_read_timeout(Some(Duration::from_millis(800))).ok()?;
 
@@ -234,6 +272,7 @@ fn unicast_mdns(ip: Ipv4Addr, verbose: bool) -> Option<String> {
     let deadline = std::time::Instant::now() + Duration::from_millis(900);
     let mut buf = [0u8; 4096];
     let mut candidates = Vec::new();
+    let mut services = Vec::new();
 
     while std::time::Instant::now() < deadline {
         match socket.recv_from(&mut buf) {
@@ -243,7 +282,9 @@ fn unicast_mdns(ip: Ipv4Addr, verbose: bool) -> Option<String> {
                     _ => continue,
                 };
                 if src_ip != ip { continue; }
-                candidates.extend(parse_mdns_records(&buf[..len]));
+                let parsed = parse_mdns_records(&buf[..len]);
+                candidates.extend(parsed.names);
+                services.extend(parsed.services);
             }
             Err(_) => break,
         }
@@ -252,11 +293,14 @@ fn unicast_mdns(ip: Ipv4Addr, verbose: bool) -> Option<String> {
     if verbose && !candidates.is_empty() {
         eprintln!("  [mDNS] {} <- candidates: {:?}", ip, candidates);
     }
+    if verbose && !services.is_empty() {
+        eprintln!("  [mDNS] {} <- services: {:?}", ip, services);
+    }
 
-    best_hostname(candidates)
+    best_hostname(candidates).map(|hostname| MdnsResult { hostname, services })
 }
 
-fn multicast_passive(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+fn multicast_passive(ip: Ipv4Addr, verbose: bool) -> Option<MdnsResult> {
     let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0)).ok()?;
     socket.join_multicast_v4(&MULTICAST_ADDR, &Ipv4Addr::UNSPECIFIED).ok()?;
     socket.set_multicast_ttl_v4(255).ok()?;
@@ -283,6 +327,7 @@ fn multicast_passive(ip: Ipv4Addr, verbose: bool) -> Option<String> {
     let deadline = std::time::Instant::now() + Duration::from_millis(600);
     let mut buf = [0u8; 4096];
     let mut candidates = Vec::new();
+    let mut svc_list = Vec::new();
 
     while std::time::Instant::now() < deadline {
         match socket.recv_from(&mut buf) {
@@ -292,7 +337,9 @@ fn multicast_passive(ip: Ipv4Addr, verbose: bool) -> Option<String> {
                     _ => continue,
                 };
                 if src_ip != ip { continue; }
-                candidates.extend(parse_mdns_records(&buf[..len]));
+                let parsed = parse_mdns_records(&buf[..len]);
+                candidates.extend(parsed.names);
+                svc_list.extend(parsed.services);
             }
             Err(_) => {}
         }
@@ -301,11 +348,14 @@ fn multicast_passive(ip: Ipv4Addr, verbose: bool) -> Option<String> {
     if verbose && !candidates.is_empty() {
         eprintln!("  [mDNS] {} <- multicast candidates: {:?}", ip, candidates);
     }
+    if verbose && !svc_list.is_empty() {
+        eprintln!("  [mDNS] {} <- multicast services: {:?}", ip, svc_list);
+    }
 
-    best_hostname(candidates)
+    best_hostname(candidates).map(|hostname| MdnsResult { hostname, services: svc_list })
 }
 
-fn unicast_dns_reverse(ip: Ipv4Addr, verbose: bool) -> Option<String> {
+fn unicast_dns_reverse(ip: Ipv4Addr, verbose: bool) -> Option<MdnsResult> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.set_read_timeout(Some(Duration::from_millis(300))).ok()?;
 
@@ -332,7 +382,10 @@ fn unicast_dns_reverse(ip: Ipv4Addr, verbose: bool) -> Option<String> {
 
     let mut buf = [0u8; 1500];
     match socket.recv_from(&mut buf) {
-        Ok((len, _)) => best_hostname(parse_mdns_records(&buf[..len])),
+        Ok((len, _)) => {
+            let parsed = parse_mdns_records(&buf[..len]);
+            best_hostname(parsed.names).map(|hostname| MdnsResult { hostname, services: parsed.services })
+        }
         Err(_) => None,
     }
 }
@@ -346,7 +399,9 @@ fn query_ip(ip: Ipv4Addr, verbose: bool) -> Option<MdnsResult> {
     let r2 = t2.join().ok().flatten();
     let r3 = t3.join().ok().flatten();
 
-    r1.or(r2).or(r3).map(|hostname| MdnsResult { hostname })
+    if r1.is_some() { return r1; }
+    if r2.is_some() { return r2; }
+    r3
 }
 
 pub async fn resolve_bulk(ips: &[Ipv4Addr], verbose: bool) -> HashMap<Ipv4Addr, MdnsResult> {

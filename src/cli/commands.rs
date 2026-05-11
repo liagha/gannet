@@ -54,6 +54,7 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
             d.vendor = crate::identity::oui::lookup(e.mac).map(|s| s.to_string());
             if let Some(m) = mdns_results.get(&e.ip) {
                 d.hostname = Some(m.hostname.clone());
+                d.services = m.services.clone();
             }
             d
         })
@@ -61,6 +62,7 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
             let mut d = Device::from_sweep(ip);
             if let Some(m) = mdns_results.get(&ip) {
                 d.hostname = Some(m.hostname.clone());
+                d.services = m.services.clone();
             }
             d
         }))
@@ -101,10 +103,10 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
         tagged.iter().partition(|(d, _)| d.via == Via::Arp);
 
     let header = format!(
-        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
-        "IP", "MAC", "Vendor", "Tag", "Hostname", "OS Hint"
+        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
+        "IP", "MAC", "Vendor", "Tag", "Hostname", "OS Hint", "Services"
     );
-    let rule = "-".repeat(124);
+    let rule = "-".repeat(140);
 
     if !arp_tagged.is_empty() {
         println!("{}", header);
@@ -114,9 +116,14 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
             let vendor = d.vendor.as_deref().unwrap_or("-");
             let hostname = d.hostname.as_deref().unwrap_or("-");
             let os = d.os_hint.as_deref().unwrap_or("-");
+            let svc = if d.services.is_empty() {
+                "-".to_string()
+            } else {
+                d.services.join(", ")
+            };
             println!(
-                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
-                d.ip, mac, vendor, tag, hostname, os
+                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
+                d.ip, mac, vendor, tag, hostname, os, svc
             );
         }
     }
@@ -127,9 +134,14 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
         for (d, tag) in &sweep_tagged {
             let hostname = d.hostname.as_deref().unwrap_or("-");
             let os = d.os_hint.as_deref().unwrap_or("-");
+            let svc = if d.services.is_empty() {
+                "-".to_string()
+            } else {
+                d.services.join(", ")
+            };
             println!(
-                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
-                d.ip, "-", "-", tag, hostname, os
+                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
+                d.ip, "-", "-", tag, hostname, os, svc
             );
         }
     }
@@ -163,10 +175,10 @@ pub fn list(store_path: PathBuf) {
     records.reverse();
 
     let header = format!(
-        "{:<22} {:<16} {:<18} {:<26} {:<20}",
-        "Tag", "Last IP", "MAC", "Vendor", "Hostname"
+        "{:<22} {:<16} {:<18} {:<26} {:<20} {}",
+        "Tag", "Last IP", "MAC", "Vendor", "Hostname", "Services"
     );
-    let rule = "-".repeat(104);
+    let rule = "-".repeat(120);
     println!("{}", header);
     println!("{}", rule);
     for r in &records {
@@ -174,9 +186,14 @@ pub fn list(store_path: PathBuf) {
         let mac = r.mac.as_deref().unwrap_or("-");
         let vendor = r.vendor.as_deref().unwrap_or("-");
         let hostname = r.hostname.as_deref().unwrap_or("-");
+        let svc = if r.services.is_empty() {
+            "-".to_string()
+        } else {
+            r.services.join(", ")
+        };
         println!(
-            "{:<22} {:<16} {:<18} {:<26} {:<20}",
-            tag, r.last_ip, mac, vendor, hostname
+            "{:<22} {:<16} {:<18} {:<26} {:<20} {}",
+            tag, r.last_ip, mac, vendor, hostname, svc
         );
     }
     println!("\n{} device(s) in store.", records.len());

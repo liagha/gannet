@@ -18,6 +18,7 @@ pub struct Device {
     pub vendor: Option<String>,
     pub hostname: Option<String>,
     pub os_hint: Option<String>,
+    pub services: Vec<String>,
     pub via: Via,
     #[allow(dead_code)]
     pub tag: Option<String>,
@@ -31,6 +32,7 @@ impl From<&ArpEntry> for Device {
             vendor: None,
             hostname: None,
             os_hint: None,
+            services: Vec::new(),
             via: Via::Arp,
             tag: None,
         }
@@ -45,6 +47,7 @@ impl Device {
             vendor: None,
             hostname: None,
             os_hint: None,
+            services: Vec::new(),
             via: Via::Sweep,
             tag: None,
         }

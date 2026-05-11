@@ -15,6 +15,12 @@ enum Capability {
     MdnsOnly,
 }
 
+#[derive(Debug, Clone)]
+pub struct MdnsServiceEvent {
+    pub ip: Ipv4Addr,
+    pub services: Vec<String>,
+}
+
 fn detect_capability() -> Capability {
     if raw_socket_available() {
         return Capability::RawSocket;
@@ -171,7 +177,25 @@ fn decode_label(data: &[u8], mut pos: usize) -> Option<(String, usize)> {
     Some((parts.join("."), end_pos.unwrap_or(pos + 1)))
 }
 
-fn parse_mdns_packet(data: &[u8]) -> Vec<ArpEntry> {
+fn extract_service_type(name: &str) -> Option<String> {
+    if !name.starts_with('_') {
+        return None;
+    }
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() >= 2 {
+        let service = parts[0];
+        let proto = parts.get(1).copied().unwrap_or("");
+        if (proto == "_tcp" || proto == "_udp") && service.len() > 1 {
+            let clean = service.trim_start_matches('_').to_string();
+            if !clean.is_empty() {
+                return Some(clean);
+            }
+        }
+    }
+    None
+}
+
+fn parse_mdns_for_services(data: &[u8]) -> Vec<String> {
     if data.len() < 12 {
         return Vec::new();
     }
@@ -182,50 +206,60 @@ fn parse_mdns_packet(data: &[u8]) -> Vec<ArpEntry> {
     let total_rrs = answer_rrs + authority_rrs + additional_rrs;
 
     let mut pos = 12usize;
+    let mut services = Vec::new();
+
     for _ in 0..questions {
-        if let Some((_, next)) = decode_label(data, pos) {
+        if let Some((name, next)) = decode_label(data, pos) {
+            if let Some(svc) = extract_service_type(&name) {
+                services.push(svc);
+            }
             pos = next + 4;
         } else {
-            return Vec::new();
+            return services;
         }
     }
 
-    let mut entries = Vec::new();
     for _ in 0..total_rrs {
         if pos >= data.len() {
             break;
         }
         let name_result = decode_label(data, pos);
-        let (_, next) = match name_result {
+        let (name, next) = match name_result {
             Some(pair) => pair,
             None => break,
         };
         pos = next;
+
+        if let Some(svc) = extract_service_type(&name) {
+            services.push(svc);
+        }
+
         if pos + 10 > data.len() {
             break;
         }
         let rtype = u16::from_be_bytes([data[pos], data[pos + 1]]);
         let rdlen = u16::from_be_bytes([data[pos + 8], data[pos + 9]]) as usize;
         pos += 10;
-        if rtype == 0x0021 {
-            if pos + 6 <= data.len() {
-                if let Some((host, _)) = decode_label(data, pos + 6) {
-                    if !host.ends_with(".local") {
-                        entries.push(ArpEntry {
-                            ip: Ipv4Addr::UNSPECIFIED,
-                            mac: MacAddr6::broadcast(),
-                        });
-                    }
+
+        if rtype == 0x000C {
+            if let Some((rdata, _)) = decode_label(data, pos) {
+                if let Some(svc) = extract_service_type(&rdata) {
+                    services.push(svc);
                 }
             }
         }
+
         pos += rdlen;
     }
-    entries
+
+    let mut seen = HashSet::new();
+    services.retain(|s| seen.insert(s.clone()));
+    services
 }
 
 fn listen_mdns(
     tx: mpsc::UnboundedSender<ArpEntry>,
+    service_tx: mpsc::UnboundedSender<MdnsServiceEvent>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
 ) {
     let socket = match join_mdns_socket() {
@@ -244,13 +278,14 @@ fn listen_mdns(
                     SocketAddr::V4(s) => *s.ip(),
                     _ => continue,
                 };
-                let entries = parse_mdns_packet(&buf[..len]);
-                for _entry in entries {
-                    let _ = tx.send(ArpEntry {
-                        ip: src_ip,
-                        mac: MacAddr6::broadcast(),
-                    });
+                let services = parse_mdns_for_services(&buf[..len]);
+                if !services.is_empty() {
+                    let _ = service_tx.send(MdnsServiceEvent { ip: src_ip, services });
                 }
+                let _ = tx.send(ArpEntry {
+                    ip: src_ip,
+                    mac: MacAddr6::broadcast(),
+                });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(100));
@@ -494,6 +529,7 @@ pub async fn listen(
     }
 
     let (tx, mut rx) = mpsc::unbounded_channel();
+    let (service_tx, mut service_rx) = mpsc::unbounded_channel();
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
     let mut threads = Vec::new();
@@ -515,16 +551,18 @@ pub async fn listen(
                 poll_arp_table(tx_clone, shutdown_clone);
             }));
             let tx_clone = tx.clone();
+            let service_tx_clone = service_tx.clone();
             let shutdown_clone = Arc::clone(&shutdown);
             threads.push(std::thread::spawn(move || {
-                listen_mdns(tx_clone, shutdown_clone);
+                listen_mdns(tx_clone, service_tx_clone, shutdown_clone);
             }));
         }
         Capability::MdnsOnly => {
             let tx_clone = tx.clone();
+            let service_tx_clone = service_tx.clone();
             let shutdown_clone = Arc::clone(&shutdown);
             threads.push(std::thread::spawn(move || {
-                listen_mdns(tx_clone, shutdown_clone);
+                listen_mdns(tx_clone, service_tx_clone, shutdown_clone);
             }));
         }
     }
@@ -587,6 +625,33 @@ pub async fn listen(
                 if let Err(e) = store.save(&store_path) {
                     if verbose {
                         eprintln!("[listen] save error: {}", e);
+                    }
+                }
+            }
+            Some(service_event) = service_rx.recv() => {
+                if let Some(&mac) = seen_local.get(&service_event.ip) {
+                    let mut device = Device {
+                        ip: service_event.ip,
+                        mac: Some(mac),
+                        vendor: None,
+                        hostname: None,
+                        os_hint: None,
+                        services: service_event.services.clone(),
+                        via: crate::identity::device::Via::Arp,
+                        tag: None,
+                    };
+                    device.vendor = crate::identity::oui::lookup(mac).map(|s| s.to_string());
+                    store.upsert(&device, crate::identity::namer::generate);
+
+                    println!(
+                        "SVC  {:<16}  {:?}",
+                        service_event.ip, service_event.services
+                    );
+
+                    if let Err(e) = store.save(&store_path) {
+                        if verbose {
+                            eprintln!("[listen] save error: {}", e);
+                        }
                     }
                 }
             }
