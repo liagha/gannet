@@ -1,13 +1,14 @@
 // FILE: src/main.rs
 // PURPOSE: Gannet CLI entry point
 use clap::{Parser, Subcommand};
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::str::FromStr;
 
 mod discovery;
 mod identity;
 
-use identity::device::Device;
+use identity::device::{Device, Via};
 
 #[derive(Parser)]
 #[command(name = "gannet")]
@@ -38,33 +39,48 @@ async fn main() {
                 None => auto_subnet(),
             };
             println!("Scanning {}/{}...\n", base, prefix);
-            let entries = discovery::arp::scan_subnet(base, prefix).await;
 
-            if entries.is_empty() {
+            let arp_entries = discovery::arp::scan_subnet(base, prefix).await;
+            let arp_ips: HashSet<Ipv4Addr> = arp_entries.iter().map(|e| e.ip).collect();
+            let sweep_results = discovery::sweep::sweep_subnet(base, prefix, &arp_ips, verbose).await;
+
+            let all_ips: Vec<Ipv4Addr> = arp_entries
+                .iter()
+                .map(|e| e.ip)
+                .chain(sweep_results.iter().copied())
+                .collect();
+
+            if all_ips.is_empty() {
                 println!("No devices found.");
                 return;
             }
 
-            let ips: Vec<Ipv4Addr> = entries.iter().map(|e| e.ip).collect();
-
             if verbose {
-                eprintln!("Resolving hostnames (mDNS / DNS / NetBIOS)...");
+                eprintln!("Resolving hostnames...");
             }
-            let mdns_results = discovery::mdns::resolve_bulk(&ips, verbose).await;
+            let mdns_results = discovery::mdns::resolve_bulk(&all_ips, verbose).await;
 
-            let mut devices: Vec<Device> = entries
+            let mut devices: Vec<Device> = arp_entries
                 .iter()
                 .map(|e| {
-                    let mut device = Device::from(e);
-                    if let Some(mdns) = mdns_results.get(&e.ip) {
-                        device.hostname = Some(mdns.hostname.clone());
+                    let mut d = Device::from(e);
+                    d.vendor = identity::oui::lookup(e.mac).map(|s| s.to_string());
+                    if let Some(m) = mdns_results.get(&e.ip) {
+                        d.hostname = Some(m.hostname.clone());
                     }
-                    device
+                    d
                 })
+                .chain(sweep_results.iter().map(|&ip| {
+                    let mut d = Device::from_sweep(ip);
+                    if let Some(m) = mdns_results.get(&ip) {
+                        d.hostname = Some(m.hostname.clone());
+                    }
+                    d
+                }))
                 .collect();
 
             if verbose {
-                eprintln!("Fingerprinting TCP stacks (ports 443/80/22)...");
+                eprintln!("Fingerprinting TCP stacks...");
             }
             let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, 0)).collect();
             let fingerprints = discovery::fingerprint::probe_bulk(&targets, verbose).await;
@@ -79,19 +95,37 @@ async fn main() {
 
             devices.sort_by_key(|d| u32::from(d.ip));
 
-            println!(
-                "\n{:<16} {:<18} {:<30} {:<24}",
-                "IP", "MAC", "Hostname", "OS Hint"
+            let (arp_devices, sweep_devices): (Vec<_>, Vec<_>) =
+                devices.iter().partition(|d| d.via == Via::Arp);
+
+            let header = format!(
+                "{:<16} {:<18} {:<26} {:<30} {:<20}",
+                "IP", "MAC", "Vendor", "Hostname", "OS Hint"
             );
-            println!("{}", "-".repeat(88));
-            for device in &devices {
-                let hostname = device.hostname.as_deref().unwrap_or("-");
-                let os_hint = device.os_hint.as_deref().unwrap_or("-");
-                println!(
-                    "{:<16} {:<18} {:<30} {:<24}",
-                    device.ip, device.mac, hostname, os_hint
-                );
+            let rule = "-".repeat(110);
+
+            if !arp_devices.is_empty() {
+                println!("{}", header);
+                println!("{}", rule);
+                for d in &arp_devices {
+                    let mac = d.mac.map(|m| m.to_string()).unwrap_or_else(|| "-".into());
+                    let vendor = d.vendor.as_deref().unwrap_or("-");
+                    let hostname = d.hostname.as_deref().unwrap_or("-");
+                    let os = d.os_hint.as_deref().unwrap_or("-");
+                    println!("{:<16} {:<18} {:<26} {:<30} {:<20}", d.ip, mac, vendor, hostname, os);
+                }
             }
+
+            if !sweep_devices.is_empty() {
+                println!("\nAdditional hosts (no MAC):");
+                println!("{}", rule);
+                for d in &sweep_devices {
+                    let hostname = d.hostname.as_deref().unwrap_or("-");
+                    let os = d.os_hint.as_deref().unwrap_or("-");
+                    println!("{:<16} {:<18} {:<26} {:<30} {:<20}", d.ip, "-", "-", hostname, os);
+                }
+            }
+
             println!("\nFound {} device(s).", devices.len());
         }
     }

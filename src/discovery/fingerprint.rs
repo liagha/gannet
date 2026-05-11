@@ -10,6 +10,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct StackFingerprint {
     pub ttl: u8,
@@ -31,6 +32,7 @@ pub enum TcpOptionKind {
     Unknown(u8),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct FingerprintResult {
     pub syn_ack: Option<StackFingerprint>,
@@ -44,21 +46,15 @@ fn parse_tcp_options(data: &[u8]) -> Vec<TcpOptionKind> {
     let mut pos = 0;
     while pos < data.len() {
         let kind = data[pos];
-        if kind == 0 {
-            break;
-        }
+        if kind == 0 { break; }
         if kind == 1 {
             kinds.push(TcpOptionKind::Nop);
             pos += 1;
             continue;
         }
-        if pos + 1 >= data.len() {
-            break;
-        }
+        if pos + 1 >= data.len() { break; }
         let len = data[pos + 1] as usize;
-        if len < 2 || pos + len > data.len() {
-            break;
-        }
+        if len < 2 || pos + len > data.len() { break; }
         kinds.push(match kind {
             2 => TcpOptionKind::Mss,
             3 => TcpOptionKind::WindowScale,
@@ -82,20 +78,11 @@ fn parse_stack_fingerprint(ttl: u8, window: u16, options_raw: &[u8]) -> StackFin
 
     while pos < options_raw.len() {
         let kind = options_raw[pos];
-        if kind == 0 {
-            break;
-        }
-        if kind == 1 {
-            pos += 1;
-            continue;
-        }
-        if pos + 1 >= options_raw.len() {
-            break;
-        }
+        if kind == 0 { break; }
+        if kind == 1 { pos += 1; continue; }
+        if pos + 1 >= options_raw.len() { break; }
         let len = options_raw[pos + 1] as usize;
-        if len < 2 || pos + len > options_raw.len() {
-            break;
-        }
+        if len < 2 || pos + len > options_raw.len() { break; }
         match kind {
             2 if len >= 4 => {
                 mss = Some(u16::from_be_bytes([options_raw[pos + 2], options_raw[pos + 3]]));
@@ -117,9 +104,7 @@ fn guess_os(fp: &StackFingerprint) -> Option<String> {
     let has_timestamp = fp.options.contains(&TcpOptionKind::Timestamp);
     let has_sack = fp.options.contains(&TcpOptionKind::SackPermitted);
 
-    if fp.ttl <= 64 {
-        scores.push(("Linux", 3));
-    }
+    if fp.ttl <= 64 { scores.push(("Linux", 3)); }
     if fp.ttl <= 64 && fp.window == 65535 && fp.mss == Some(1460) && fp.scale.is_some() {
         scores.push(("Linux (kernel 4.x+)", 8));
     }
@@ -132,16 +117,10 @@ fn guess_os(fp: &StackFingerprint) -> Option<String> {
     if fp.ttl == 64 && fp.window == 65535 && fp.mss == Some(1460) {
         scores.push(("macOS 10.15+", 7));
     }
-    if fp.ttl == 64 {
-        scores.push(("macOS/Linux", 3));
-    }
+    if fp.ttl == 64 { scores.push(("macOS/Linux", 3)); }
 
-    if fp.ttl == 128 {
-        scores.push(("Windows", 3));
-    }
-    if fp.ttl == 128 && fp.window == 8192 {
-        scores.push(("Windows 7/2008", 7));
-    }
+    if fp.ttl == 128 { scores.push(("Windows", 3)); }
+    if fp.ttl == 128 && fp.window == 8192 { scores.push(("Windows 7/2008", 7)); }
     if fp.ttl == 128 && fp.window == 65535 && fp.scale == Some(8) {
         scores.push(("Windows 10/11", 8));
     }
@@ -149,19 +128,11 @@ fn guess_os(fp: &StackFingerprint) -> Option<String> {
         scores.push(("Windows 10/11", 9));
     }
 
-    if fp.ttl == 255 {
-        scores.push(("BSD/Solaris/Network Device", 4));
-    }
-    if fp.ttl == 255 && fp.window == 16384 {
-        scores.push(("OpenBSD", 7));
-    }
-    if fp.ttl == 255 && fp.window == 65535 {
-        scores.push(("FreeBSD", 6));
-    }
+    if fp.ttl == 255 { scores.push(("BSD/Solaris/Network Device", 4)); }
+    if fp.ttl == 255 && fp.window == 16384 { scores.push(("OpenBSD", 7)); }
+    if fp.ttl == 255 && fp.window == 65535 { scores.push(("FreeBSD", 6)); }
 
-    if fp.ttl <= 32 {
-        scores.push(("Embedded/IoT", 3));
-    }
+    if fp.ttl <= 32 { scores.push(("Embedded/IoT", 3)); }
 
     scores.sort_by_key(|(_, s)| std::cmp::Reverse(*s));
     scores.first().map(|(name, _)| name.to_string())
@@ -210,9 +181,7 @@ fn wait_syn_ack(
 
     loop {
         let now = std::time::Instant::now();
-        if now >= deadline {
-            return None;
-        }
+        if now >= deadline { return None; }
         let remaining = deadline - now;
 
         match iter.next_with_timeout(remaining) {
@@ -245,9 +214,7 @@ fn wait_syn_ack(
             Err(_) => return None,
         }
 
-        if remaining < Duration::from_millis(10) {
-            return None;
-        }
+        if remaining < Duration::from_millis(10) { return None; }
     }
 }
 
@@ -309,7 +276,6 @@ pub async fn probe_syn(target: Ipv4Addr, verbose: bool) -> Option<FingerprintRes
     };
 
     let mut set = JoinSet::new();
-
     for &port in FALLBACK_PORTS {
         set.spawn(tokio::task::spawn_blocking(move || {
             probe_port_blocking(target, port, src_ip, verbose)
@@ -356,7 +322,6 @@ pub async fn probe_bulk(
     verbose: bool,
 ) -> HashMap<Ipv4Addr, Option<FingerprintResult>> {
     let mut set = JoinSet::new();
-
     for &(ip, _) in targets {
         set.spawn(async move {
             let result = probe_syn(ip, verbose).await;

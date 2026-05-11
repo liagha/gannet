@@ -3,13 +3,13 @@
 ## PHASE: Phase 2 - Identity Enrichment
 
 ### COMPLETED MODULES
-- arp - async ARP scanner returning IP-to-MAC mappings - src/discovery/arp.rs
-- main - CLI with scan command, auto-detects subnet, --verbose flag - src/main.rs
-- discovery mod - module root - src/discovery/mod.rs
-- mdns - hostname resolution via mDNS, unicast DNS, NetBIOS in parallel per IP - src/discovery/mdns.rs
-- device - Device struct combining ARP + DNS + fingerprint data - src/identity/device.rs
-- identity mod - module root - src/identity/mod.rs
-- fingerprint - OS fingerprinting via parallel SYN probes on ports 443/80/22 - src/discovery/fingerprint.rs
+- arp - async ARP scanner, dynamic quiet window - src/discovery/arp.rs
+- sweep - ICMP + TCP SYN sweep fallback for ARP-invisible hosts - src/discovery/sweep.rs
+- mdns - mDNS service browse + passive collect + unicast DNS fallback - src/discovery/mdns.rs
+- fingerprint - parallel SYN probes on 443/80/22 - src/discovery/fingerprint.rs
+- oui - MAC OUI vendor lookup from bundled IEEE database - src/identity/oui.rs
+- device - Device struct with vendor, via, optional MAC - src/identity/device.rs
+- main - scan command with Vendor column, split ARP/sweep output - src/main.rs
 
 ### IN PROGRESS
 - None
@@ -19,15 +19,14 @@
 - namer - human-readable tag assignment for devices - src/identity/namer.rs
 
 ### KNOWN ISSUES / BLOCKERS
-- TCP fingerprint requires sudo; firewall may block all three fallback ports
-- NBNS parser uses fixed offset (56 bytes); malformed responses may be silently dropped
+- mDNS service browse collects names from all responders on multicast group, not per-IP matched
+- transmute in oui.rs is safe but can be replaced with phf crate if preferred
+- sweep thread count unbounded on large subnets
 
 ### SESSION NOTES
 2026-05-11
-- ARP: dynamic quiet window (1.5s after last reply, 5s hard cap) replaces fixed 8s window
-- mDNS: all IPs resolved in parallel via JoinSet; mDNS + unicast DNS + NBNS run in parallel threads per IP
-- NetBIOS (NBNS) added as third hostname resolver covering Windows/IoT devices
-- Fingerprint: parallel SYN probes on ports 443, 80, 22 per device; first SYN+ACK wins
-- All devices fingerprinted in parallel via JoinSet
-- --port flag removed; ports are now internal to fingerprint module
-- Typical scan time reduced from ~10s to ~3-4s on quiet networks
+- OUI vendor lookup: IEEE database bundled as src/data/oui.csv, included at compile time
+- mDNS rewritten: service browse queries + passive collect window replaces reverse PTR
+- Unicast DNS kept as fallback, NBNS dropped
+- Vendor column added to output table
+- ArpEntry.mac field used directly for OUI lookup in main

@@ -8,7 +8,7 @@ use pnet::packet::Packet;
 use pnet::util::MacAddr;
 use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 
@@ -64,7 +64,6 @@ fn send_arp_request(
     arp_packet.set_sender_proto_addr(source_ip);
     arp_packet.set_target_hw_addr(MacAddr::zero());
     arp_packet.set_target_proto_addr(target_ip);
-
     ethernet_packet.set_payload(arp_packet.packet());
 
     match tx.send_to(ethernet_packet.packet(), None) {
@@ -90,10 +89,8 @@ async fn receive_arp_responses(
             Ok(Channel::Ethernet(_, rx)) => rx,
             _ => return,
         };
-
-        let deadline = std::time::Instant::now() + hard_cap;
-
-        while std::time::Instant::now() < deadline {
+        let deadline = Instant::now() + hard_cap;
+        while Instant::now() < deadline {
             match channel.next() {
                 Ok(packet) => {
                     if let Some(ethernet) = pnet::packet::ethernet::EthernetPacket::new(packet) {
@@ -114,25 +111,41 @@ async fn receive_arp_responses(
     });
 
     let mut entries = HashSet::new();
-    let hard_end = tokio::time::sleep(hard_cap);
-    tokio::pin!(hard_end);
+    let start = Instant::now();
+    let hard_deadline = start + hard_cap;
+    let mut last_seen: Option<Instant> = None;
 
     loop {
-        let quiet = tokio::time::sleep(quiet_window);
+        let now = Instant::now();
+        if now >= hard_deadline {
+            break;
+        }
+
+        let quiet_expired = last_seen
+            .map(|t| now.duration_since(t) >= quiet_window)
+            .unwrap_or(false);
+
+        if quiet_expired {
+            break;
+        }
+
+        let remaining = hard_deadline - now;
+        let poll = tokio::time::sleep(Duration::from_millis(50));
+
         tokio::select! {
             Some(entry) = rx.recv() => {
                 entries.insert(entry);
+                last_seen = Some(Instant::now());
             }
-            _ = quiet, if !entries.is_empty() => {
-                break;
-            }
-            _ = &mut hard_end => {
-                while let Ok(entry) = rx.try_recv() {
-                    entries.insert(entry);
-                }
+            _ = poll => {}
+            _ = tokio::time::sleep(remaining) => {
                 break;
             }
         }
+    }
+
+    while let Ok(entry) = rx.try_recv() {
+        entries.insert(entry);
     }
 
     entries
