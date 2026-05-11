@@ -130,14 +130,13 @@ async fn receive_arp_responses(
         }
 
         let remaining = hard_deadline - now;
-        let poll = tokio::time::sleep(Duration::from_millis(50));
 
         tokio::select! {
             Some(entry) = rx.recv() => {
                 entries.insert(entry);
                 last_seen = Some(Instant::now());
             }
-            _ = poll => {}
+            _ = tokio::time::sleep(Duration::from_millis(50)) => {}
             _ = tokio::time::sleep(remaining) => {
                 break;
             }
@@ -149,6 +148,13 @@ async fn receive_arp_responses(
     }
 
     entries
+}
+
+fn sweep_targets(subnet: Ipv4Addr, prefix: u8, found: &HashSet<Ipv4Addr>) -> Vec<Ipv4Addr> {
+    subnet_iter(subnet, prefix)
+        .into_iter()
+        .filter(|ip| !found.contains(ip))
+        .collect()
 }
 
 pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
@@ -171,13 +177,13 @@ pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
     };
 
     let targets = subnet_iter(subnet, prefix);
-    let recv_interface = interface.clone();
+    let recv_iface = interface.clone();
 
     let recv_handle = tokio::spawn(async move {
         receive_arp_responses(
-            recv_interface,
-            Duration::from_secs(5),
-            Duration::from_millis(1500),
+            recv_iface,
+            Duration::from_secs(10),
+            Duration::from_millis(2500),
         )
             .await
     });
@@ -189,7 +195,21 @@ pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
 
-    let entries = match timeout(Duration::from_secs(6), recv_handle).await {
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+
+    let found_so_far: HashSet<Ipv4Addr> = {
+        let mut temp = HashSet::new();
+        temp.insert(source_ip);
+        temp
+    };
+
+    let retry_targets = sweep_targets(subnet, prefix, &found_so_far);
+    for target_ip in &retry_targets {
+        send_arp_request(&interface, source_ip, source_mac, *target_ip);
+        tokio::time::sleep(Duration::from_millis(3)).await;
+    }
+
+    let entries = match timeout(Duration::from_secs(11), recv_handle).await {
         Ok(Ok(set)) => set,
         _ => HashSet::new(),
     };
