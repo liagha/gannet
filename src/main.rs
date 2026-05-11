@@ -3,12 +3,14 @@
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 mod discovery;
 mod identity;
 
 use identity::device::{Device, Via};
+use identity::store::Store;
 
 #[derive(Parser)]
 #[command(name = "gannet")]
@@ -25,6 +27,18 @@ enum Commands {
         subnet: Option<String>,
         #[arg(short, long)]
         verbose: bool,
+        #[arg(long, default_value = ".gannet/devices.json")]
+        store: PathBuf,
+    },
+    Tag {
+        ip: String,
+        tag: String,
+        #[arg(long, default_value = ".gannet/devices.json")]
+        store: PathBuf,
+    },
+    List {
+        #[arg(long, default_value = ".gannet/devices.json")]
+        store: PathBuf,
     },
 }
 
@@ -33,7 +47,7 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { subnet, verbose } => {
+        Commands::Scan { subnet, verbose, store: store_path } => {
             let (base, prefix) = match subnet {
                 Some(ref input) => parse_subnet(input),
                 None => auto_subnet(),
@@ -55,9 +69,7 @@ async fn main() {
                 return;
             }
 
-            if verbose {
-                eprintln!("Resolving hostnames...");
-            }
+            if verbose { eprintln!("Resolving hostnames..."); }
             let mdns_results = discovery::mdns::resolve_bulk(&all_ips, verbose).await;
 
             let mut devices: Vec<Device> = arp_entries
@@ -79,9 +91,7 @@ async fn main() {
                 }))
                 .collect();
 
-            if verbose {
-                eprintln!("Fingerprinting TCP stacks...");
-            }
+            if verbose { eprintln!("Fingerprinting TCP stacks..."); }
             let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, 0)).collect();
             let fingerprints = discovery::fingerprint::probe_bulk(&targets, verbose).await;
 
@@ -95,38 +105,87 @@ async fn main() {
 
             devices.sort_by_key(|d| u32::from(d.ip));
 
-            let (arp_devices, sweep_devices): (Vec<_>, Vec<_>) =
-                devices.iter().partition(|d| d.via == Via::Arp);
+            let mut store = Store::load(&store_path);
+
+            let tagged: Vec<(&Device, String)> = devices
+                .iter()
+                .map(|d| {
+                    let record = store.upsert(d, identity::namer::generate);
+                    let tag = record.tag.clone().unwrap_or_else(|| "-".into());
+                    (d, tag)
+                })
+                .collect();
+
+            if let Err(e) = store.save(&store_path) {
+                eprintln!("Warning: could not save store: {}", e);
+            }
+
+            let (arp_tagged, sweep_tagged): (Vec<_>, Vec<_>) =
+                tagged.iter().partition(|(d, _)| d.via == Via::Arp);
 
             let header = format!(
-                "{:<16} {:<18} {:<26} {:<30} {:<20}",
-                "IP", "MAC", "Vendor", "Hostname", "OS Hint"
+                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
+                "IP", "MAC", "Vendor", "Tag", "Hostname", "OS Hint"
             );
-            let rule = "-".repeat(110);
+            let rule = "-".repeat(124);
 
-            if !arp_devices.is_empty() {
+            if !arp_tagged.is_empty() {
                 println!("{}", header);
                 println!("{}", rule);
-                for d in &arp_devices {
+                for (d, tag) in &arp_tagged {
                     let mac = d.mac.map(|m| m.to_string()).unwrap_or_else(|| "-".into());
                     let vendor = d.vendor.as_deref().unwrap_or("-");
                     let hostname = d.hostname.as_deref().unwrap_or("-");
                     let os = d.os_hint.as_deref().unwrap_or("-");
-                    println!("{:<16} {:<18} {:<26} {:<30} {:<20}", d.ip, mac, vendor, hostname, os);
+                    println!("{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}", d.ip, mac, vendor, tag, hostname, os);
                 }
             }
 
-            if !sweep_devices.is_empty() {
+            if !sweep_tagged.is_empty() {
                 println!("\nAdditional hosts (no MAC):");
                 println!("{}", rule);
-                for d in &sweep_devices {
+                for (d, tag) in &sweep_tagged {
                     let hostname = d.hostname.as_deref().unwrap_or("-");
                     let os = d.os_hint.as_deref().unwrap_or("-");
-                    println!("{:<16} {:<18} {:<26} {:<30} {:<20}", d.ip, "-", "-", hostname, os);
+                    println!("{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}", d.ip, "-", "-", tag, hostname, os);
                 }
             }
 
             println!("\nFound {} device(s).", devices.len());
+        }
+
+        Commands::Tag { ip, tag, store: store_path } => {
+            let mut store = Store::load(&store_path);
+            let ip_addr = Ipv4Addr::from_str(&ip).unwrap_or_else(|_| {
+                eprintln!("Invalid IP: {}", ip);
+                std::process::exit(1);
+            });
+            if store.set_tag(None, ip_addr, tag.clone()) {
+                store.save(&store_path).ok();
+                println!("Tagged {} as \"{}\".", ip, tag);
+            } else {
+                println!("No record found for {}.", ip);
+            }
+        }
+
+        Commands::List { store: store_path } => {
+            let store = Store::load(&store_path);
+            let mut records: Vec<_> = store.all().collect();
+            records.sort_by_key(|r| r.last_seen);
+            records.reverse();
+
+            let header = format!("{:<22} {:<16} {:<18} {:<26} {:<20}", "Tag", "Last IP", "MAC", "Vendor", "Hostname");
+            let rule = "-".repeat(104);
+            println!("{}", header);
+            println!("{}", rule);
+            for r in &records {
+                let tag = r.tag.as_deref().unwrap_or("-");
+                let mac = r.mac.as_deref().unwrap_or("-");
+                let vendor = r.vendor.as_deref().unwrap_or("-");
+                let hostname = r.hostname.as_deref().unwrap_or("-");
+                println!("{:<22} {:<16} {:<18} {:<26} {:<20}", tag, r.last_ip, mac, vendor, hostname);
+            }
+            println!("\n{} device(s) in store.", records.len());
         }
     }
 }

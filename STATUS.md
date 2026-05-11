@@ -9,27 +9,27 @@
 - fingerprint - parallel SYN probes on 443/80/22 - src/discovery/fingerprint.rs
 - oui - MAC OUI vendor lookup from bundled IEEE database - src/identity/oui.rs
 - device - Device struct with vendor, via, optional MAC - src/identity/device.rs
-- main - scan command with Vendor column, split ARP/sweep output - src/main.rs
+- store - persistent JSON registry; upsert, tag override, list - src/identity/store.rs
+- namer - FNV-seeded adjective-noun tag generator - src/identity/namer.rs
+- main - scan/tag/list commands with Tag column and store persistence - src/main.rs
 
 ### IN PROGRESS
 - None
 
 ### NEXT UP
-- store - persistent device storage with tags - src/identity/store.rs
-- namer - human-readable tag assignment for devices - src/identity/namer.rs
+- cli refactor - move subcommand handlers out of main.rs into src/cli/ - src/cli/
+- net/interface - shared interface/source-IP resolution (currently duplicated across arp/sweep/fingerprint)
 
 ### KNOWN ISSUES / BLOCKERS
 - ARP retry pass uses a fixed 1500ms delay before retry; could be adaptive
 - transmute in oui.rs is safe but can be replaced with phf crate if preferred
 - sweep thread count unbounded on large subnets
 - fingerprinting still returning no OS hints; likely firewall on test devices
+- store.set_tag uses IP fallback key for sweep devices; a MAC lookup after the fact won't match
 
 ### SESSION NOTES
 2026-05-11
-- Diagnosed inconsistent device count: ARP quiet window too short for WiFi reply latency
-- ARP: quiet window 1500->2500ms, hard cap 5->8s, added retry pass at 1.5s mark
-- Diagnosed bad hostnames: passive multicast collect not filtered by source IP
-- mDNS: switched to unicast queries sent directly to target IP:5353, filter recv by source
-- Added TXT record parsing for fn=/n= friendly name fields (Chromecast/Android)
-- Added is_service_label filter; best_hostname scorer prefers proper device names
-- multicast_passive retained but now also filters by source IP
+- Implemented store: persistent JSON, keyed by MAC hex (or IP string for sweep), first/last seen timestamps, seen_count, tag
+- Implemented namer: FNV hash of key -> adjective + noun, deterministic and stable across sessions
+- main: added --store path, scan upserts all devices and shows Tag column, new `tag` subcommand overrides a device's name, new `list` subcommand dumps store sorted by recency
+- Added serde + serde_json to Cargo.toml
