@@ -1,7 +1,7 @@
 // FILE: src/discovery/arp.rs
 // PURPOSE: Async ARP scanner for device discovery on local subnet
 use macaddr::MacAddr6;
-use pnet::datalink::{self, Channel, NetworkInterface};
+use pnet::datalink::{self, Channel};
 use pnet::packet::arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket};
 use pnet::packet::ethernet::{EtherTypes, MutableEthernetPacket};
 use pnet::packet::Packet;
@@ -18,12 +18,6 @@ pub struct ArpEntry {
     pub mac: MacAddr6,
 }
 
-fn get_interface() -> Option<NetworkInterface> {
-    datalink::interfaces()
-        .into_iter()
-        .find(|iface| iface.is_up() && !iface.is_loopback() && iface.ips.iter().any(|ip| ip.is_ipv4()))
-}
-
 fn subnet_iter(subnet: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
     let base = u32::from(subnet) & !((1u32 << (32 - prefix)) - 1);
     let count = 1u32 << (32 - prefix);
@@ -37,7 +31,7 @@ fn subnet_iter(subnet: Ipv4Addr, prefix: u8) -> Vec<Ipv4Addr> {
 }
 
 fn send_arp_request(
-    interface: &NetworkInterface,
+    interface: &pnet::datalink::NetworkInterface,
     source_ip: Ipv4Addr,
     source_mac: MacAddr,
     target_ip: Ipv4Addr,
@@ -78,7 +72,7 @@ fn macaddr_to_macaddr6(mac: MacAddr) -> MacAddr6 {
 }
 
 async fn receive_arp_responses(
-    interface: NetworkInterface,
+    interface: pnet::datalink::NetworkInterface,
     hard_cap: Duration,
     quiet_window: Duration,
 ) -> HashSet<ArpEntry> {
@@ -157,8 +151,8 @@ fn sweep_targets(subnet: Ipv4Addr, prefix: u8, found: &HashSet<Ipv4Addr>) -> Vec
         .collect()
 }
 
-pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8) -> Vec<ArpEntry> {
-    let interface = match get_interface() {
+pub async fn scan_subnet(subnet: Ipv4Addr, prefix: u8, iface: Option<&str>) -> Vec<ArpEntry> {
+    let interface = match crate::net::interface::find_interface(iface) {
         Some(iface) => iface,
         None => return Vec::new(),
     };

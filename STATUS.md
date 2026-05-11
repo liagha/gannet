@@ -1,37 +1,38 @@
 # GANNET STATUS
 
-## PHASE: Phase 2 - Identity Enrichment
+## PHASE: Phase 3 — Identity Resolution & Hardening
 
 ### COMPLETED MODULES
-- arp - raw ARP scanner (Linux) + /proc/net/arp reader (Termux) - src/discovery/arp.rs
-- sweep - ICMP+TCP SYN (Linux) + TCP connect (Termux) - src/discovery/sweep.rs
-- mdns - unicast mDNS + multicast passive + DNS reverse - src/discovery/mdns.rs
-- fingerprint - SYN/ACK analysis (Linux) + connect-only stub (Termux) - src/discovery/fingerprint.rs
-- oui - MAC OUI vendor lookup - src/identity/oui.rs
-- device - Device struct - src/identity/device.rs
-- store - persistent JSON registry - src/identity/store.rs
-- namer - FNV-seeded adjective-noun tag generator - src/identity/namer.rs
-- main - scan/tag/list commands with ASCII banner - src/main.rs
+- arp — raw ARP scanner (Linux) + passive /proc/net/arp fallback (Termux) — src/discovery/arp.rs
+- sweep — ICMP + TCP SYN sweep for hosts outside ARP cache — src/discovery/sweep.rs
+- mdns — unicast mDNS reverse, multicast passive, unicast DNS reverse — src/discovery/mdns.rs
+- fingerprint — TCP SYN/ACK stack analysis (Linux raw) + connect-only stub (Termux) — src/discovery/fingerprint.rs
+- oui — MAC OUI vendor lookup from embedded CSV — src/identity/oui.rs
+- device — unified Device struct with ARP/Sweep origin — src/identity/device.rs
+- store — persistent JSON registry, MAC-key promotion, IP history, cross-scan merge — src/identity/store.rs
+- namer — deterministic adjective‑noun tag generator (FNV seeded) — src/identity/namer.rs
+- net/interface — find_interface / find_source_ip with optional name filter — src/net/interface.rs
+- cli/commands — scan (--subnet, --interface, --verbose), tag, list — src/cli/commands.rs
+- main — thin CLI dispatch — src/main.rs
 
 ### IN PROGRESS
 - None
 
 ### NEXT UP
-- cli refactor - move subcommand handlers out of main.rs into src/cli/
-- net/interface - deduplicate find_source_ip (copied across arp/sweep/fingerprint)
+- Passive discovery mode — `gannet listen` for non‑root/Termux hotspot use
+- mDNS service enumeration — capture service types for device classification
+- Device classification — combine vendor, OS hint, mDNS services into category label
+- Export formats — `--json`, `--csv` output flags for scan
+- Active targeting — `gannet target <tag>` to resolve identity across scans
 
-### KNOWN ISSUES / BLOCKERS
-- Termux ARP is passive only (/proc/net/arp); won't find devices not yet in kernel cache
-- Termux fingerprinting returns no OS hint; TTL not accessible without raw sockets
-- transmute in oui.rs is safe but replaceable with phf
-- sweep thread count unbounded on large subnets
+### KNOWN ISSUES
+- Termux ARP is passive only; finds only devices already in kernel cache
+- Termux sweep (ICMP/TCP) fails silently without raw sockets
+- Termux OS fingerprinting returns no hint (TTL inaccessible without raw sockets)
+- macOS raw socket support untested (pnet datalink may fail)
 
 ### SESSION NOTES
-2026-05-11 (pass 2)
-- Removed stray top-level `use std::net::Ipv4Addr` from fingerprint.rs (only needed inside mod raw)
-- Dropped probe_syn from pub use re-exports; probe_bulk is the only public surface, probe_syn is internal
-- Made probe_syn private (no pub) in both raw and ttl_only modules
-- Added #![allow(dead_code)] at crate root in main.rs to suppress scaffolding warnings for
-  StackFingerprint fields, TcpOptionKind variants, FingerprintResult::syn_ack, Store::get
-  (all intentional forward-looking API surface, not actual dead code)
-- Both `cargo build --features raw` and `cargo build --features termux` now produce zero warnings
+2026‑05‑11 (pass 7 — status rewrite)
+- Documented Termux/hotspot limitations clearly
+- Clarified that passive discovery is the critical next feature for mobile hotspot use
+- Restructured NEXT UP to reflect identity resolution priorities from PROMPT.md

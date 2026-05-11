@@ -1,3 +1,5 @@
+// FILE: src/discovery/sweep.rs
+// PURPOSE: ICMP + TCP SYN sweep for hosts without ARP responses
 use pnet::packet::icmp::{self, IcmpTypes, MutableIcmpPacket};
 use pnet::packet::ip::IpNextHeaderProtocols;
 use pnet::packet::tcp::{self, MutableTcpPacket, TcpFlags, TcpOption};
@@ -7,20 +9,11 @@ use std::collections::HashSet;
 use std::net::{IpAddr, Ipv4Addr, SocketAddrV4};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 const TCP_PROBE_PORTS: &[u16] = &[80, 443];
-
-fn find_source_ip() -> Option<Ipv4Addr> {
-    pnet::datalink::interfaces()
-        .iter()
-        .find(|i| i.is_up() && !i.is_loopback())
-        .and_then(|i| i.ips.iter().find(|ip| ip.is_ipv4()))
-        .and_then(|ip| match ip.ip() {
-            IpAddr::V4(v4) => Some(v4),
-            _ => None,
-        })
-}
+const MAX_CONCURRENT: usize = 256;
 
 fn next_probe_port() -> u16 {
     use std::sync::atomic::{AtomicU16, Ordering};
@@ -170,9 +163,10 @@ pub async fn sweep_subnet(
     subnet: Ipv4Addr,
     prefix: u8,
     known: &HashSet<Ipv4Addr>,
+    iface: Option<&str>,
     verbose: bool,
 ) -> HashSet<Ipv4Addr> {
-    let src_ip = match find_source_ip() {
+    let src_ip = match crate::net::interface::find_source_ip(iface) {
         Some(ip) => ip,
         None => return HashSet::new(),
     };
@@ -192,18 +186,22 @@ pub async fn sweep_subnet(
     }
 
     let found = Arc::new(Mutex::new(HashSet::new()));
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
     let mut set = JoinSet::new();
 
     for target in targets {
         let found = Arc::clone(&found);
-        set.spawn(tokio::task::spawn_blocking(move || {
-            if probe_host(target, src_ip) {
-                found.lock().unwrap().insert(target);
-                if verbose {
-                    eprintln!("  [sweep] {} responded", target);
+        let permit = Arc::clone(&semaphore);
+        set.spawn(async move {
+            let _guard = permit.acquire().await;
+            tokio::task::spawn_blocking(move || {
+                if probe_host(target, src_ip) {
+                    found.lock().unwrap().insert(target);
                 }
-            }
-        }));
+            })
+                .await
+                .ok();
+        });
     }
 
     while set.join_next().await.is_some() {}

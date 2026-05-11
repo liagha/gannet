@@ -1,3 +1,5 @@
+// FILE: src/identity/oui.rs
+// PURPOSE: MAC OUI vendor lookup from embedded CSV
 use macaddr::MacAddr6;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -12,9 +14,8 @@ fn table() -> &'static HashMap<u32, &'static str> {
         for line in RAW.lines() {
             if let Some((hex, name)) = line.split_once(',') {
                 if let Ok(n) = u32::from_str_radix(hex.trim(), 16) {
-                    map.insert(n, unsafe {
-                        std::mem::transmute::<&str, &'static str>(name)
-                    });
+                    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+                    map.insert(n, leaked);
                 }
             }
         }

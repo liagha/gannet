@@ -239,17 +239,6 @@ mod raw {
         }
     }
 
-    fn find_source_ip() -> Option<Ipv4Addr> {
-        pnet::datalink::interfaces()
-            .iter()
-            .find(|i| i.is_up() && !i.is_loopback())
-            .and_then(|i| i.ips.iter().find(|ip| ip.is_ipv4()))
-            .and_then(|ip| match ip.ip() {
-                std::net::IpAddr::V4(v4) => Some(v4),
-                _ => None,
-            })
-    }
-
     fn probe_port_blocking(
         target: Ipv4Addr,
         port: u16,
@@ -284,8 +273,8 @@ mod raw {
         wait_syn_ack(&mut rx, src_port, port, Duration::from_secs(2))
     }
 
-    async fn probe_syn(target: Ipv4Addr, verbose: bool) -> Option<FingerprintResult> {
-        let src_ip = match find_source_ip() {
+    async fn probe_syn(target: Ipv4Addr, iface: Option<&str>, verbose: bool) -> Option<FingerprintResult> {
+        let src_ip = match crate::net::interface::find_source_ip(iface) {
             Some(ip) => ip,
             None => return None,
         };
@@ -334,12 +323,14 @@ mod raw {
 
     pub async fn probe_bulk(
         targets: &[(Ipv4Addr, u16)],
+        iface: Option<&str>,
         verbose: bool,
     ) -> HashMap<Ipv4Addr, Option<FingerprintResult>> {
         let mut set = JoinSet::new();
         for &(ip, _) in targets {
+            let iface = iface.map(|s| s.to_string());
             set.spawn(async move {
-                let result = probe_syn(ip, verbose).await;
+                let result = probe_syn(ip, iface.as_deref(), verbose).await;
                 (ip, result)
             });
         }
@@ -372,7 +363,7 @@ mod ttl_only {
         None
     }
 
-    async fn probe_syn(target: Ipv4Addr, _verbose: bool) -> Option<FingerprintResult> {
+    async fn probe_syn(target: Ipv4Addr, _iface: Option<&str>, _verbose: bool) -> Option<FingerprintResult> {
         let hint = tokio::task::spawn_blocking(move || connect_and_hint(target))
             .await
             .ok()
@@ -382,12 +373,13 @@ mod ttl_only {
 
     pub async fn probe_bulk(
         targets: &[(Ipv4Addr, u16)],
+        _iface: Option<&str>,
         _verbose: bool,
     ) -> HashMap<Ipv4Addr, Option<FingerprintResult>> {
         let mut set = JoinSet::new();
         for &(ip, _) in targets {
             set.spawn(async move {
-                let result = probe_syn(ip, false).await;
+                let result = probe_syn(ip, None, false).await;
                 (ip, result)
             });
         }
