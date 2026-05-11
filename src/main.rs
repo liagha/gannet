@@ -1,5 +1,6 @@
 // FILE: src/main.rs
 // PURPOSE: Gannet CLI entry point
+#![allow(dead_code)]
 use clap::{Parser, Subcommand};
 use std::collections::HashSet;
 use std::net::Ipv4Addr;
@@ -11,6 +12,14 @@ mod identity;
 
 use identity::device::{Device, Via};
 use identity::store::Store;
+
+const BANNER: &str = r#"
+  __ _  __ _ _ __  _ __   ___| |_
+ / _` |/ _` | '_ \| '_ \ / _ \ __|
+| (_| | (_| | | | | | | |  __/ |_
+ \__, |\__,_|_| |_|_| |_|\___|\__|
+ |___/
+"#;
 
 #[derive(Parser)]
 #[command(name = "gannet")]
@@ -48,6 +57,8 @@ async fn main() {
 
     match cli.command {
         Commands::Scan { subnet, verbose, store: store_path } => {
+            println!("{}", BANNER);
+
             let (base, prefix) = match subnet {
                 Some(ref input) => parse_subnet(input),
                 None => auto_subnet(),
@@ -56,7 +67,8 @@ async fn main() {
 
             let arp_entries = discovery::arp::scan_subnet(base, prefix).await;
             let arp_ips: HashSet<Ipv4Addr> = arp_entries.iter().map(|e| e.ip).collect();
-            let sweep_results = discovery::sweep::sweep_subnet(base, prefix, &arp_ips, verbose).await;
+            let sweep_results =
+                discovery::sweep::sweep_subnet(base, prefix, &arp_ips, verbose).await;
 
             let all_ips: Vec<Ipv4Addr> = arp_entries
                 .iter()
@@ -69,7 +81,9 @@ async fn main() {
                 return;
             }
 
-            if verbose { eprintln!("Resolving hostnames..."); }
+            if verbose {
+                eprintln!("Resolving hostnames...");
+            }
             let mdns_results = discovery::mdns::resolve_bulk(&all_ips, verbose).await;
 
             let mut devices: Vec<Device> = arp_entries
@@ -91,7 +105,9 @@ async fn main() {
                 }))
                 .collect();
 
-            if verbose { eprintln!("Fingerprinting TCP stacks..."); }
+            if verbose {
+                eprintln!("Fingerprinting TCP stacks...");
+            }
             let targets: Vec<(Ipv4Addr, u16)> = devices.iter().map(|d| (d.ip, 0)).collect();
             let fingerprints = discovery::fingerprint::probe_bulk(&targets, verbose).await;
 
@@ -137,7 +153,10 @@ async fn main() {
                     let vendor = d.vendor.as_deref().unwrap_or("-");
                     let hostname = d.hostname.as_deref().unwrap_or("-");
                     let os = d.os_hint.as_deref().unwrap_or("-");
-                    println!("{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}", d.ip, mac, vendor, tag, hostname, os);
+                    println!(
+                        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
+                        d.ip, mac, vendor, tag, hostname, os
+                    );
                 }
             }
 
@@ -147,7 +166,10 @@ async fn main() {
                 for (d, tag) in &sweep_tagged {
                     let hostname = d.hostname.as_deref().unwrap_or("-");
                     let os = d.os_hint.as_deref().unwrap_or("-");
-                    println!("{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}", d.ip, "-", "-", tag, hostname, os);
+                    println!(
+                        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20}",
+                        d.ip, "-", "-", tag, hostname, os
+                    );
                 }
             }
 
@@ -174,7 +196,10 @@ async fn main() {
             records.sort_by_key(|r| r.last_seen);
             records.reverse();
 
-            let header = format!("{:<22} {:<16} {:<18} {:<26} {:<20}", "Tag", "Last IP", "MAC", "Vendor", "Hostname");
+            let header = format!(
+                "{:<22} {:<16} {:<18} {:<26} {:<20}",
+                "Tag", "Last IP", "MAC", "Vendor", "Hostname"
+            );
             let rule = "-".repeat(104);
             println!("{}", header);
             println!("{}", rule);
@@ -183,7 +208,10 @@ async fn main() {
                 let mac = r.mac.as_deref().unwrap_or("-");
                 let vendor = r.vendor.as_deref().unwrap_or("-");
                 let hostname = r.hostname.as_deref().unwrap_or("-");
-                println!("{:<22} {:<16} {:<18} {:<26} {:<20}", tag, r.last_ip, mac, vendor, hostname);
+                println!(
+                    "{:<22} {:<16} {:<18} {:<26} {:<20}",
+                    tag, r.last_ip, mac, vendor, hostname
+                );
             }
             println!("\n{} device(s) in store.", records.len());
         }
