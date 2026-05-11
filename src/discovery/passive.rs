@@ -257,6 +257,23 @@ fn parse_mdns_for_services(data: &[u8]) -> Vec<String> {
     services
 }
 
+fn subnet_from_interface(iface: &pnet::datalink::NetworkInterface) -> Option<(Ipv4Addr, u8)> {
+    for ip in &iface.ips {
+        if let IpAddr::V4(v4) = ip.ip() {
+            let prefix = ip.prefix();
+            let mask = !((1u32 << (32 - prefix)) - 1);
+            let base = Ipv4Addr::from(u32::from(v4) & mask);
+            return Some((base, prefix));
+        }
+    }
+    None
+}
+
+fn ip_in_subnet(ip: Ipv4Addr, base: Ipv4Addr, prefix: u8) -> bool {
+    let mask = !((1u32 << (32 - prefix)) - 1);
+    (u32::from(ip) & mask) == (u32::from(base) & mask)
+}
+
 fn listen_mdns(
     tx: mpsc::UnboundedSender<ArpEntry>,
     service_tx: mpsc::UnboundedSender<MdnsServiceEvent>,
@@ -360,6 +377,8 @@ fn sniff_raw(
         }
     };
 
+    let local_subnet = subnet_from_interface(&iface);
+
     let mut config = pnet::datalink::Config::default();
     config.read_timeout = Some(Duration::from_millis(500));
 
@@ -413,7 +432,10 @@ fn sniff_raw(
                                     && !sender_ip.is_loopback()
                                     && !sender_mac.is_nil()
                                 {
-                                    if seen.insert((sender_ip, sender_mac)) {
+                                    let allowed = local_subnet
+                                        .map(|(base, prefix)| ip_in_subnet(sender_ip, base, prefix))
+                                        .unwrap_or(true);
+                                    if allowed && seen.insert((sender_ip, sender_mac)) {
                                         if verbose {
                                             eprintln!(
                                                 "[listen] NEW sender {} -> {}",
@@ -437,7 +459,10 @@ fn sniff_raw(
                                     && !target_ip.is_loopback()
                                     && !target_mac.is_nil()
                                 {
-                                    if seen.insert((target_ip, target_mac)) {
+                                    let allowed = local_subnet
+                                        .map(|(base, prefix)| ip_in_subnet(target_ip, base, prefix))
+                                        .unwrap_or(true);
+                                    if allowed && seen.insert((target_ip, target_mac)) {
                                         if verbose {
                                             eprintln!(
                                                 "[listen] NEW target {} -> {}",
@@ -459,7 +484,10 @@ fn sniff_raw(
                                     && !src_ip.is_loopback()
                                     && !src_ip.is_multicast()
                                 {
-                                    if seen.insert((src_ip, src_mac)) {
+                                    let allowed = local_subnet
+                                        .map(|(base, prefix)| ip_in_subnet(src_ip, base, prefix))
+                                        .unwrap_or(true);
+                                    if allowed && seen.insert((src_ip, src_mac)) {
                                         if verbose {
                                             eprintln!(
                                                 "[listen] NEW IPv4 {} <- {}",
