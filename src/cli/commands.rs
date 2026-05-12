@@ -1,5 +1,6 @@
 // FILE: src/cli/commands.rs
-// PURPOSE: Subcommand handlers for scan, tag, list, listen
+// FILE: src/cli/commands.rs
+// PURPOSE: Subcommand handlers for scan, survey, listen, tag, list
 use crate::identity::device::{Device, Via};
 use crate::identity::store::Store;
 use std::collections::HashSet;
@@ -147,6 +148,62 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
     }
 
     println!("\nFound {} device(s).", devices.len());
+}
+
+pub async fn survey(interface: Option<String>, verbose: bool, store_path: PathBuf) {
+    println!("{}", BANNER);
+    println!("Surveying networks...\n");
+
+    let subnets = crate::discovery::survey::survey(interface, verbose).await;
+
+    if subnets.is_empty() {
+        println!("No additional networks discovered.");
+        return;
+    }
+
+    let header = format!(
+        "{:<20} {:<8} {:<10} {:<18} {:<18}",
+        "Network", "Prefix", "Hosts", "Source", "Gateway"
+    );
+    let rule = "-".repeat(80);
+
+    println!("{}", header);
+    println!("{}", rule);
+
+    let mut live_count = 0;
+    for subnet in &subnets {
+        let host_str = subnet.host_count.map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+        let source_str = format!("{:?}", subnet.source);
+        let gateway_str = subnet.gateway.map(|g| g.to_string()).unwrap_or_else(|| "-".into());
+
+        println!(
+            "{:<20} /{:<7} {:<10} {:<18} {:<18}",
+            subnet.network, subnet.prefix, host_str, source_str, gateway_str
+        );
+
+        if let Some(count) = subnet.host_count {
+            live_count += count;
+        }
+    }
+
+    let mut store = Store::load(&store_path);
+    let mut discovered_any = false;
+
+    for subnet in &subnets {
+        if subnet.host_count.unwrap_or(0) > 0 {
+            let device = Device::from_sweep(subnet.network);
+            let _ = store.upsert(&device, crate::identity::namer::generate);
+            discovered_any = true;
+        }
+    }
+
+    if discovered_any {
+        if let Err(e) = store.save(&store_path) {
+            eprintln!("Warning: could not save store: {}", e);
+        }
+    }
+
+    println!("\n{} network(s) found, {} live host(s).", subnets.len(), live_count);
 }
 
 pub async fn listen(interface: Option<String>, verbose: bool, store_path: PathBuf) {

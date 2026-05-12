@@ -1,4 +1,5 @@
 // FILE: src/main.rs
+// FILE: src/main.rs
 // PURPOSE: Gannet CLI entry point
 #![allow(dead_code)]
 use clap::{Parser, Subcommand};
@@ -22,6 +23,14 @@ enum Commands {
     Scan {
         #[arg(short, long)]
         subnet: Option<String>,
+        #[arg(short, long)]
+        interface: Option<String>,
+        #[arg(short, long)]
+        verbose: bool,
+        #[arg(long, default_value = ".gannet/devices.json")]
+        store: PathBuf,
+    },
+    Survey {
         #[arg(short, long)]
         interface: Option<String>,
         #[arg(short, long)]
@@ -56,6 +65,9 @@ async fn main() {
     match cli.command {
         Commands::Scan { subnet, interface, verbose, store } => {
             cli::commands::scan(subnet, interface, verbose, store).await;
+        }
+        Commands::Survey { interface, verbose, store } => {
+            cli::commands::survey(interface, verbose, store).await;
         }
         Commands::Listen { interface, verbose, store } => {
             cli::commands::listen(interface, verbose, store).await;
