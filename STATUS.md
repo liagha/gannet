@@ -19,10 +19,64 @@
 ### IN PROGRESS
 - None
 
-### NEXT UP
-- Device classification — combine vendor, OS hint, mDNS services into category label
-- Deterministic naming v2 — classification-based tags (apple-tv, windows-pc) instead of random adjective-noun
-- Export formats — --json, --csv output flags for scan
+### NEXT UP — Phase 4: Cross-Network Discovery & Clean Naming
+
+#### 4a. Survey — finding other networks
+- `gannet survey` command — scan beyond current subnet to discover adjacent networks
+- Passive detection: capture gateway IPs, DHCP offers, routing advertisements from listener
+- Active sweep: probe common adjacent /24s (if on 192.168.100.0/24, try .0.0/24, .1.0/24, .10.0/24, 10.0.0.0/24)
+- Gateway interrogation: SNMP/UPnP/routing table queries to discover VLANs and secondary networks
+- Output: list of discovered subnets with live host counts
+
+#### 4b. Device classification
+- Combine vendor OUI + OS hint + mDNS services → category label
+- Categories: Phone, Laptop, Desktop, Router, IoT, Printer, TV/Streaming, Unknown
+- mDNS service mapping: `_googlecast` → TV/Streaming, `_androidtvremote2` → TV, `_companion-link` → Phone, `_airplay` → Apple device, `_printer` → Printer, `_ssh`/`_workstation` → Laptop/Desktop
+- Vendor hints: Samsung + Phone services → Phone, HUAWEI + no services → likely Router
+- TTL hints: 64 → likely Linux/macOS/Android, 128 → Windows, 255 → network gear
+
+#### 4c. Naming v2 — classification-aware tags
+- Naming tiers (display priority):
+    1. User alias — manual override label ("Alice's Xiaomi")
+    2. mDNS hostname — self-reported name ("alice-phone.local")
+    3. Classification tag — auto-generated based on category ("phone-frost-orbit")
+    4. Raw tag — deterministic adjective-noun fallback ("frost-orbit")
+- Stable key: MAC-based hash (never changes across IP reassignments)
+- `gannet tag` — interactive device selection via fuzzy match or MAC targeting (not just IP)
+
+#### 4d. Combined watch mode
+- `gannet watch` — scan then listen, merging results live
+- Immediate sweep for current state + ongoing passive collection
+- Deduplication across scan and listen phases
+- Live-updating table output
+
+#### 4e. Export formats
+- `--json` flag for structured output
+- `--csv` flag for spreadsheet import
+- Both apply to scan, list, and watch
+
+#### 4f. Interactive tagging
+- `gannet tag` with no arguments → list devices, prompt for selection
+- Select by number, IP, or MAC prefix
+- Tag by MAC key so labels survive IP changes
+
+### VISION — Naming Tiers
+```
+Layer 1: MAC hash → generated tag (always available, never changes)   "frost-orbit"
+Layer 2: Vendor OUI → brand hint                                      "Xiaomi Communications Co Ltd"
+Layer 3: mDNS hostname / DNS reverse → self-reported name             "alice-phone.local"
+Layer 4: User alias → override label set by you                       "Alice's Xiaomi"
+Layer 5: Classification → automatic category                           "Phone"
+```
+
+### VISION — Future Commands
+| Command | Purpose |
+|---------|---------|
+| `gannet survey` | Scan beyond current subnet, discover adjacent networks |
+| `gannet watch` | Combined scan + passive listen in one session |
+| `gannet tag` (interactive) | Tag a device by MAC via fuzzy selection |
+| `gannet classify` | Show categorized device list with categories |
+| `gannet alias <tag> <name>` | Set persistent human-readable alias separate from generated tag |
 
 ### KNOWN ISSUES
 - Without root/cap_net_raw, pnet can't enumerate interfaces OR open datalink channels; LocalInterface fallback reads /sys/class/net + `ip addr` for subnet detection, but raw scanning still needs root
@@ -34,6 +88,12 @@
 
 ### SESSION NOTES
 2026‑05‑12
-- Added LocalInterface with /sys/class/net fallback in net/interface.rs
-- Fixed compile error: pnet::datalink::interfaces() is infallible (returns Vec, not Result); fallback trigger is now "pnet returned empty or no IPv4 interfaces" instead of "Result is Err"
-- auto_subnet in commands.rs now tries pnet first, then LocalInterface fallback
+- Brainstorming session: defined vision for cross-network discovery and clean naming
+- Identified naming tiers: MAC tag → vendor → hostname → alias → classification
+- Planned `survey` command for adjacent subnet discovery (passive + active)
+- Planned device classification using vendor + OS hint + mDNS services
+- Planned `watch` mode combining scan + listen
+- Planned export formats (JSON, CSV)
+- Planned interactive device tagging by MAC instead of IP-only
+- All above added to NEXT UP as Phase 4 items
+- No code changes this session — roadmap update only
