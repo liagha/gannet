@@ -209,6 +209,11 @@ fn auto_subnet(iface: Option<&str>) -> (Ipv4Addr, u8) {
             }
         }
     }
+    if let Some(local) = crate::net::interface::find_local_interface(iface) {
+        if let Some((ip, prefix)) = local.ips.first() {
+            return (network_base(*ip, *prefix), *prefix);
+        }
+    }
     eprintln!("No active IPv4 interface found. Using default 192.168.1.0/24.");
     (Ipv4Addr::new(192, 168, 1, 0), 24)
 }

@@ -257,7 +257,7 @@ fn parse_mdns_for_services(data: &[u8]) -> Vec<String> {
     services
 }
 
-fn subnet_from_interface(iface: &pnet::datalink::NetworkInterface) -> Option<(Ipv4Addr, u8)> {
+fn subnet_from_pnet(iface: &pnet::datalink::NetworkInterface) -> Option<(Ipv4Addr, u8)> {
     for ip in &iface.ips {
         if let IpAddr::V4(v4) = ip.ip() {
             let prefix = ip.prefix();
@@ -377,7 +377,7 @@ fn sniff_raw(
         }
     };
 
-    let local_subnet = subnet_from_interface(&iface);
+    let local_subnet = subnet_from_pnet(&iface);
 
     let mut config = pnet::datalink::Config::default();
     config.read_timeout = Some(Duration::from_millis(500));
