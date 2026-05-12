@@ -666,8 +666,10 @@ pub async fn listen(
                         os_hint: None,
                         services: service_event.services.clone(),
                         via: crate::identity::device::Via::Arp,
+                        category: None,
                         tag: None,
                     };
+
                     device.vendor = crate::identity::oui::lookup(mac).map(|s| s.to_string());
                     store.upsert(&device, crate::identity::namer::generate);
 

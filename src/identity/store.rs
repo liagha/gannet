@@ -1,5 +1,6 @@
 // FILE: src/identity/store.rs
 // PURPOSE: Persistent JSON device registry keyed by stable identity (MAC or IP)
+use crate::identity::classify::{Category};
 use crate::identity::device::Device;
 use macaddr::MacAddr6;
 use serde::{Deserialize, Serialize};
@@ -19,6 +20,7 @@ pub struct Record {
     pub hostname: Option<String>,
     pub os_hint: Option<String>,
     pub services: Vec<String>,
+    pub category: Option<Category>,
     pub first_seen: u64,
     pub last_seen: u64,
     pub seen_count: u32,
@@ -60,6 +62,15 @@ fn merge_string_vec(mut existing: Vec<String>, incoming: Vec<String>) -> Vec<Str
     existing
 }
 
+fn merge_category(existing: Option<Category>, incoming: Option<Category>) -> Option<Category> {
+    match (existing, incoming) {
+        (Some(e), Some(i)) if e == Category::Unknown && i != Category::Unknown => Some(i),
+        (None, Some(i)) => Some(i),
+        (Some(e), _) => Some(e),
+        (None, None) => None,
+    }
+}
+
 impl Store {
     pub fn load(path: &Path) -> Self {
         std::fs::read_to_string(path)
@@ -79,6 +90,7 @@ impl Store {
     pub fn upsert(&mut self, device: &Device, tag_gen: impl Fn(&str) -> String) -> &Record {
         let now = now_secs();
         let ip_str = device.ip.to_string();
+        let device_category = device.category.clone();
 
         match device.mac {
             Some(mac) => {
@@ -108,6 +120,7 @@ impl Store {
                         if device.hostname.is_some() { old.hostname = device.hostname.clone(); }
                         if device.os_hint.is_some() { old.os_hint = device.os_hint.clone(); }
                         old.services = merge_string_vec(old.services, device.services.clone());
+                        old.category = merge_category(old.category.clone(), device_category);
                         return insert_record(&mut self.records, old);
                     }
                 }
@@ -124,6 +137,7 @@ impl Store {
                         hostname: device.hostname.clone(),
                         os_hint: device.os_hint.clone(),
                         services: device.services.clone(),
+                        category: device_category.clone(),
                         first_seen: now,
                         last_seen: now,
                         seen_count: 0,
@@ -140,6 +154,7 @@ impl Store {
                 if device.hostname.is_some() { record.hostname = device.hostname.clone(); }
                 if device.os_hint.is_some() { record.os_hint = device.os_hint.clone(); }
                 record.services = merge_string_vec(std::mem::take(&mut record.services), device.services.clone());
+                record.category = merge_category(record.category.clone(), device_category);
 
                 &self.records[&mkey]
             }
@@ -156,6 +171,7 @@ impl Store {
                     hostname: device.hostname.clone(),
                     os_hint: device.os_hint.clone(),
                     services: device.services.clone(),
+                    category: device_category.clone(),
                     first_seen: now,
                     last_seen: now,
                     seen_count: 0,
@@ -171,6 +187,7 @@ impl Store {
                 if device.hostname.is_some() { record.hostname = device.hostname.clone(); }
                 if device.os_hint.is_some() { record.os_hint = device.os_hint.clone(); }
                 record.services = merge_string_vec(std::mem::take(&mut record.services), device.services.clone());
+                record.category = merge_category(record.category.clone(), device_category);
 
                 &self.records[&ikey]
             }

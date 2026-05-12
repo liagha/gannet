@@ -2,6 +2,7 @@
 // PURPOSE: Unified device model combining discovery and enrichment data
 use crate::discovery::arp::ArpEntry;
 use crate::discovery::fingerprint::FingerprintResult;
+use crate::identity::classify::{Category, classify};
 use macaddr::MacAddr6;
 use std::net::Ipv4Addr;
 
@@ -20,7 +21,7 @@ pub struct Device {
     pub os_hint: Option<String>,
     pub services: Vec<String>,
     pub via: Via,
-    #[allow(dead_code)]
+    pub category: Option<Category>,
     pub tag: Option<String>,
 }
 
@@ -34,6 +35,7 @@ impl From<&ArpEntry> for Device {
             os_hint: None,
             services: Vec::new(),
             via: Via::Arp,
+            category: None,
             tag: None,
         }
     }
@@ -49,11 +51,16 @@ impl Device {
             os_hint: None,
             services: Vec::new(),
             via: Via::Sweep,
+            category: None,
             tag: None,
         }
     }
 
     pub fn apply_fingerprint(&mut self, fp: &FingerprintResult) {
         self.os_hint = fp.os_hint.clone();
+    }
+
+    pub fn classify(&mut self) {
+        self.category = Some(classify(self));
     }
 }

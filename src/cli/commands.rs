@@ -1,5 +1,4 @@
 // FILE: src/cli/commands.rs
-// FILE: src/cli/commands.rs
 // PURPOSE: Subcommand handlers for scan, survey, listen, tag, list
 use crate::identity::device::{Device, Via};
 use crate::identity::store::Store;
@@ -83,6 +82,10 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
         }
     }
 
+    for device in devices.iter_mut() {
+        device.classify();
+    }
+
     devices.sort_by_key(|d| u32::from(d.ip));
 
     let mut store = Store::load(&store_path);
@@ -104,10 +107,10 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
         tagged.iter().partition(|(d, _)| d.via == Via::Arp);
 
     let header = format!(
-        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
-        "IP", "MAC", "Vendor", "Tag", "Hostname", "OS Hint", "Services"
+        "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {:<16} {}",
+        "IP", "MAC", "Vendor", "Tag", "Hostname", "OS Hint", "Category", "Services"
     );
-    let rule = "-".repeat(140);
+    let rule = "-".repeat(160);
 
     if !arp_tagged.is_empty() {
         println!("{}", header);
@@ -117,14 +120,15 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
             let vendor = d.vendor.as_deref().unwrap_or("-");
             let hostname = d.hostname.as_deref().unwrap_or("-");
             let os = d.os_hint.as_deref().unwrap_or("-");
+            let category = d.category.as_ref().map(|c| c.as_str()).unwrap_or("-");
             let svc = if d.services.is_empty() {
                 "-".to_string()
             } else {
                 d.services.join(", ")
             };
             println!(
-                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
-                d.ip, mac, vendor, tag, hostname, os, svc
+                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {:<16} {}",
+                d.ip, mac, vendor, tag, hostname, os, category, svc
             );
         }
     }
@@ -135,14 +139,15 @@ pub async fn scan(subnet: Option<String>, interface: Option<String>, verbose: bo
         for (d, tag) in &sweep_tagged {
             let hostname = d.hostname.as_deref().unwrap_or("-");
             let os = d.os_hint.as_deref().unwrap_or("-");
+            let category = d.category.as_ref().map(|c| c.as_str()).unwrap_or("-");
             let svc = if d.services.is_empty() {
                 "-".to_string()
             } else {
                 d.services.join(", ")
             };
             println!(
-                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {}",
-                d.ip, "-", "-", tag, hostname, os, svc
+                "{:<16} {:<18} {:<26} {:<22} {:<20} {:<20} {:<16} {}",
+                d.ip, "-", "-", tag, hostname, os, category, svc
             );
         }
     }
@@ -232,10 +237,10 @@ pub fn list(store_path: PathBuf) {
     records.reverse();
 
     let header = format!(
-        "{:<22} {:<16} {:<18} {:<26} {:<20} {}",
-        "Tag", "Last IP", "MAC", "Vendor", "Hostname", "Services"
+        "{:<22} {:<16} {:<18} {:<26} {:<16} {:<20} {}",
+        "Tag", "Last IP", "MAC", "Vendor", "Category", "Hostname", "Services"
     );
-    let rule = "-".repeat(120);
+    let rule = "-".repeat(140);
     println!("{}", header);
     println!("{}", rule);
     for r in &records {
@@ -243,14 +248,15 @@ pub fn list(store_path: PathBuf) {
         let mac = r.mac.as_deref().unwrap_or("-");
         let vendor = r.vendor.as_deref().unwrap_or("-");
         let hostname = r.hostname.as_deref().unwrap_or("-");
+        let category = r.category.as_ref().map(|c| c.as_str()).unwrap_or("-");
         let svc = if r.services.is_empty() {
             "-".to_string()
         } else {
             r.services.join(", ")
         };
         println!(
-            "{:<22} {:<16} {:<18} {:<26} {:<20} {}",
-            tag, r.last_ip, mac, vendor, hostname, svc
+            "{:<22} {:<16} {:<18} {:<26} {:<16} {:<20} {}",
+            tag, r.last_ip, mac, vendor, category, hostname, svc
         );
     }
     println!("\n{} device(s) in store.", records.len());

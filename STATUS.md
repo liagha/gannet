@@ -10,24 +10,18 @@
 - passive — auto-tiered listener: raw socket sniff > ARP table poll > mDNS join; subnet-filtered; mDNS service events — src/discovery/passive.rs
 - survey — three-layer subnet discovery: passive gateway/DHCP detection, UPnP WAN/LAN interrogation, adjacent + common private sweep — src/discovery/survey.rs
 - oui — MAC OUI vendor lookup from embedded CSV — src/identity/oui.rs
-- device — unified Device struct with services field — src/identity/device.rs
-- store — persistent JSON registry, MAC-key promotion, IP history, cross-scan merge, services merge — src/identity/store.rs
+- classify — device category classification combining vendor OUI, OS hint, mDNS services, and hostname heuristics — src/identity/classify.rs
+- device — unified Device struct with services field, classification method — src/identity/device.rs
+- store — persistent JSON registry, MAC-key promotion, IP history, cross-scan merge, services merge, category persistence — src/identity/store.rs
 - namer — deterministic adjective‑noun tag generator (FNV seeded) — src/identity/namer.rs
 - net/interface — find_interface / find_source_ip + LocalInterface with /sys/class/net fallback when pnet returns no IPv4 interfaces — src/net/interface.rs
-- cli/commands — scan, survey, listen, tag, list; auto_subnet uses LocalInterface fallback; services column in output — src/cli/commands.rs
+- cli/commands — scan, survey, listen, tag, list; classification integration in scan and list outputs — src/cli/commands.rs
 - main — thin CLI dispatch with scan, survey, listen, tag, list — src/main.rs
 
 ### IN PROGRESS
 - None
 
 ### NEXT UP — Phase 4 (remaining)
-
-#### 4b. Device classification
-- Combine vendor OUI + OS hint + mDNS services → category label
-- Categories: Phone, Laptop, Desktop, Router, IoT, Printer, TV/Streaming, Unknown
-- mDNS service mapping: `_googlecast` → TV/Streaming, `_androidtvremote2` → TV, `_companion-link` → Phone, `_airplay` → Apple device, `_printer` → Printer, `_ssh`/`_workstation` → Laptop/Desktop
-- Vendor hints: Samsung + Phone services → Phone, HUAWEI + no services → likely Router
-- TTL hints: 64 → likely Linux/macOS/Android, 128 → Windows, 255 → network gear
 
 #### 4c. Naming v2 — classification-aware tags
 - Naming tiers (display priority):
@@ -79,15 +73,29 @@ Layer 5: Classification → automatic category                           "Phone"
 - macOS raw socket support untested (pnet datalink may fail)
 - UPnP discovery requires gateway to expose IGD services; many consumer routers do but enterprise/firewalled may not
 - Survey adjacent sweep probes up to ~60 subnets; full run can take 30-60 seconds depending on network latency
+- Classification heuristics rely on vendor strings, mDNS service names, and OS hints — may misclassify devices with ambiguous signatures
 
 ### SESSION NOTES
-2026-05-12
-- Implemented `gannet survey` with three-layer architecture:
-  - Layer 1: Passive 30s listen capturing gateway IPs from ARP + DHCP server detection via UDP port 67
-  - Layer 2: UPnP SSDP M-SEARCH for InternetGatewayDevice, fallback port scan for rootDesc.xml, SOAP queries for WANIPConnection/PPPConnection to extract external IPs and subnet masks
-  - Layer 3: Adjacent subnet generation (up/down one /24 from current) plus common private ranges (10.x, 172.16-17.x, 192.168.x)
-  - Each discovered subnet probed via sweep for live host count
-- Added `url` crate dependency for UPnP URL parsing
-- Survey results displayed with network, prefix, host count, discovery source, and gateway IP
-- Discovered subnets with live hosts are upserted into the identity store
-- No changes to existing discovery modules — survey is purely additive
+2026-07-13
+- Implemented device classification module (src/identity/classify.rs):
+  - Seven categories: Phone, Laptop, Desktop, Router, IoT, Printer, TV/Streaming, Unknown
+  - Multi-source classification pipeline: mDNS services > vendor OUI > hostname > OS hint > vendor keyword fallbacks
+  - Service mappings: _googlecast/_androidtvremote2 → TV, _companion-link → Phone, _printer → Printer, _workstation/_ssh → Laptop
+  - Vendor mappings: Cisco/Ubiquiti/TP-Link → Router, Raspberry/Espressif → IoT, Samsung/LG/Sony → TV
+  - Hostname heuristics: "phone"/"iphone" → Phone, "tv"/"roku" → TV, "sensor"/"shelly" → IoT
+  - OS hint heuristics: Windows → Desktop, Android/iOS → Phone, BSD/Solaris → Router, Embedded → IoT
+  - Category enum serializes with serde for store persistence
+- Integrated classification into Device struct:
+  - Added `category: Option<Category>` field to Device
+  - Added `classify()` method that runs the classification pipeline
+  - Classification runs during scan after fingerprinting but before store upsert
+- Updated Store to persist categories:
+  - Added `category` field to Record
+  - `merge_category()` helper prefers non-Unknown categories when merging records
+  - Categories survive IP changes and cross-scan merges
+- Updated CLI output:
+  - scan: added Category column between OS Hint and Services
+  - list: added Category column between Vendor and Hostname
+  - Column widths adjusted for 160-char display in scan, 140-char in list
+- All existing tests pass; no breaking changes to discovery modules
+- Next: classification-aware tag generation (4c), watch mode (4d)
